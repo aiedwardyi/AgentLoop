@@ -402,7 +402,25 @@ function daemonState() {
   const pending = sortPending(store.listTasks('pending'));
   const recent = store.listTasks('done')
     .sort((left, right) => taskTime(right, 'finishedAt') - taskTime(left, 'finishedAt'))
-    .slice(0, 20);
+    .slice(0, 20)
+    .map((task) => {
+      try {
+        const resultPath = path.join(store.paths.results, `${task.id}.json`);
+        const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+
+        if (!result || typeof result !== 'object') {
+          return task;
+        }
+
+        return {
+          ...task,
+          ...(typeof result.summary === 'string' ? { summary: result.summary } : {}),
+          ...(Object.hasOwn(result, 'reason') ? { reason: result.reason } : {}),
+        };
+      } catch {
+        return task;
+      }
+    });
 
   return {
     daemon: {
@@ -450,14 +468,18 @@ function readJsonBody(req) {
 }
 
 function serveDashboard(res) {
-  const dashboardPath = path.join(store.paths.root, 'dashboard', 'index.html');
+  const dashboardPath = path.join(store.paths.root, 'public', 'index.html');
 
-  if (fs.existsSync(dashboardPath)) {
+  try {
     send(res, 200, fs.readFileSync(dashboardPath), 'text/html; charset=utf-8');
-    return;
-  }
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      send(res, 404, 'Not found.', 'text/plain; charset=utf-8');
+      return;
+    }
 
-  send(res, 200, '<!doctype html><p>AgentLoop daemon is running.</p>', 'text/html; charset=utf-8');
+    throw error;
+  }
 }
 
 async function dispatch(req, res) {
