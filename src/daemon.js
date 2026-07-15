@@ -238,9 +238,25 @@ function completeTask(task, details) {
     && (details.exitCode !== 0 || details.signal);
   const invalidLoopResult = !cancelled && !details.forceFailed && !details.timedOut
     && !workerExitedNonzero && !parsed;
-  const status = cancelled || details.forceFailed || details.timedOut || workerExitedNonzero || invalidLoopResult
-    ? 'failed'
-    : parsed.status;
+  let reason = null;
+
+  if (cancelled) {
+    reason = 'cancelled';
+  } else if (details.reason) {
+    reason = details.reason;
+  } else if (details.timedOut) {
+    reason = 'timed_out';
+  } else if (details.forceFailed) {
+    reason = 'worker_failed';
+  } else if (workerExitedNonzero) {
+    reason = 'worker_exited_nonzero';
+  } else if (invalidLoopResult) {
+    reason = 'invalid_loop_result';
+  } else if (parsed.status === 'failed') {
+    reason = 'worker_reported_failure';
+  }
+
+  const status = cancelled ? 'cancelled' : reason ? 'failed' : parsed.status;
   const result = {
     id: task.id,
     status,
@@ -253,11 +269,7 @@ function completeTask(task, details) {
         : fallbackSummary(details.resultText, status, details.timedOut),
     resultText: trimResult(details.resultText),
     exitCode: details.exitCode,
-    ...(cancelled
-      ? { reason: 'cancelled' }
-      : workerExitedNonzero
-        ? { reason: 'worker_exited_nonzero' }
-        : {}),
+    ...(reason ? { reason } : {}),
     durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
     finishedAt,
   };
@@ -265,19 +277,17 @@ function completeTask(task, details) {
     ...task,
     status,
     finishedAt,
-    ...(cancelled ? { reason: 'cancelled' } : {}),
+    ...(reason ? { reason } : {}),
   };
 
   try {
     store.writeResult(result);
     store.writeTask(completedTask, 'running');
     store.moveTask(task.id, 'running', 'done');
-    if (cancelled) {
-      store.appendEvent('fail', { id: task.id, reason: 'cancelled' });
-    } else if (workerExitedNonzero) {
-      store.appendEvent('fail', { id: task.id, reason: 'worker_exited_nonzero', code: details.exitCode });
-    } else if (invalidLoopResult) {
-      store.appendEvent('fail', { id: task.id, reason: 'invalid_loop_result' });
+    if (status === 'cancelled') {
+      store.appendEvent('cancel', { id: task.id, reason });
+    } else if (status === 'failed') {
+      store.appendEvent('fail', { id: task.id, reason, ...(workerExitedNonzero ? { code: details.exitCode } : {}) });
     } else {
       store.appendEvent('done', { id: task.id, status });
     }
@@ -314,6 +324,7 @@ function spawnWorker(task) {
     completeTask(task, {
       exitCode: null,
       forceFailed: true,
+      reason: 'worker_start_failed',
       resultText: `Worker failed to start: ${error.message}`,
       timedOut: false,
     });
@@ -321,6 +332,7 @@ function spawnWorker(task) {
   }
 
   let lastTextLine = '';
+  let inputFailed = false;
   let timedOut = false;
   let settled = false;
   let timeout;
@@ -339,7 +351,7 @@ function spawnWorker(task) {
       lastTextLine = text;
     }
   };
-  const finish = (exitCode, signal, forceFailed = false) => {
+  const finish = (exitCode, signal, forceFailed = false, reason) => {
     if (settled || stopping) {
       return;
     }
@@ -351,6 +363,7 @@ function spawnWorker(task) {
       exitCode,
       signal,
       forceFailed,
+      reason: reason || (inputFailed ? 'worker_input_failed' : undefined),
       resultText: readWorkerOutput(outputPath, lastTextLine),
       timedOut,
       cancelled: worker.cancelled,
@@ -361,10 +374,11 @@ function spawnWorker(task) {
   streamLines(child.stderr, captureLine);
   child.once('error', (error) => {
     captureLine(`Worker error: ${error.message}`);
-    finish(null, null, true);
+    finish(null, null, true, 'worker_error');
   });
   child.once('close', (code, signal) => finish(code, signal));
   child.stdin.on('error', (error) => {
+    inputFailed = true;
     captureLine(`Worker input error: ${error.message}`);
   });
 
@@ -380,7 +394,7 @@ function spawnWorker(task) {
     child.stdin.end(taskPrompt(task));
   } catch (error) {
     captureLine(`Worker input error: ${error.message}`);
-    finish(null, null, true);
+    finish(null, null, true, 'worker_input_failed');
   }
 }
 
@@ -410,6 +424,7 @@ function startTask(task) {
     completeTask(runningTask, {
       exitCode: null,
       forceFailed: true,
+      reason: 'worker_start_failed',
       resultText: `Worker failed to start: ${error.message}`,
       timedOut: false,
     });
@@ -473,7 +488,10 @@ function dashboardTask(task, activity) {
 
 function dashboardRecentTask(task) {
   const result = resultForTask(task);
-  const value = dashboardTask(task);
+  const value = {
+    ...dashboardTask(task),
+    prompt: typeof task.prompt === 'string' ? task.prompt : '',
+  };
 
   if (!result) {
     return value;

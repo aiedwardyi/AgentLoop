@@ -395,6 +395,9 @@ main{
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .rsum.exp{white-space:pre-wrap;overflow:visible;word-break:break-word}
+.rdetail{display:none;margin-top:7px;color:var(--text)}
+.rsum.exp .rdetail{display:block}
+.rdetail b{color:var(--muted);font:600 10px/1.6 var(--mono);letter-spacing:.06em;text-transform:uppercase}
 .rside{
   flex:none;text-align:right;font-size:11px;color:var(--muted);line-height:1.75;
   font-family:var(--mono);font-variant-numeric:tabular-nums;min-width:74px;
@@ -710,7 +713,7 @@ form .btn{margin-top:14px}
       <button class="btn primary" type="submit">Dispatch task</button>
       <span class="formmsg" id="taskMsg" aria-live="polite"></span>
     </form>
-    <div class="divider"><span>Loop</span></div>
+    <div class="divider" id="loopDivider"><span>Loop</span></div>
     <form id="loopForm">
       <label for="lProject">Project</label>
       <input id="lProject" required autocomplete="off" placeholder="name or path">
@@ -734,6 +737,7 @@ form .btn{margin-top:14px}
 
 <script>
 'use strict';
+const FEATURES = {loop: false, message: false, answer: false};
 /* ================= helpers ================= */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
@@ -1007,6 +1011,7 @@ const runBase = new Map();   // id -> {ms, at} elapsed baseline
 const armed = new Map();     // id -> expiry ts for two-click cancel
 const expanded = new Set();  // recent ids with expanded summary
 const seenMsg = new Map();   // msg id -> pollN when first seen
+let drawerTaskId = null;
 
 function changed(key, sig){
   if (sigs[key] === sig) return false;
@@ -1107,6 +1112,7 @@ function renderBlocked(list){
   }).join('');
 }
 async function handleAnswer(id, btn){
+  if (!FEATURES.answer) return;
   const ta = document.getElementById('ans-' + id);
   const answer = (ta?.value || '').trim();
   if (!answer) { ta?.focus(); return; }
@@ -1264,6 +1270,7 @@ function renderRecent(list){
   $('#cRecent').textContent = arr.length || '';
   const sig = arr.map(t => [
     t?.id, t?.title, t?.status ?? t?.result?.status, t?.summary ?? t?.result?.summary,
+    t?.reason ?? t?.result?.reason, t?.prompt,
     fmtRel(t?.finishedAt ?? t?.result?.finishedAt)
   ].join('|')).join('~');
   if (!changed('rec', sig)) return;
@@ -1271,12 +1278,18 @@ function renderRecent(list){
     const id = esc(t?.id);
     const st = t?.status ?? t?.result?.status;
     const sum = t?.summary ?? t?.result?.summary ?? '';
+    const reason = t?.reason ?? t?.result?.reason ?? '';
+    const prompt = t?.prompt ?? '';
     const [pc, pt] = statusPill(st);
     return '<div class="rrow" data-id="' + id + '" data-title="' + esc(t?.title || 'untitled') + '" title="Open transcript" tabindex="0" role="button">' +
       '<span class="pill ' + pc + '"><i></i>' + esc(pt) + '</span>' +
       '<div class="rmain">' +
         '<div class="rtitle">' + esc(t?.title || 'untitled') + '<span class="mid">' + id + '</span></div>' +
-        '<div class="rsum' + (expanded.has(t?.id) ? ' exp' : '') + '">' + esc(sum || '(no summary)') + '</div>' +
+        '<div class="rsum' + (expanded.has(t?.id) ? ' exp' : '') + '"><span>' + esc(sum || '(no summary)') + '</span>' +
+          '<div class="rdetail">' +
+            (reason ? '<div><b>reason</b> ' + esc(reason) + '</div>' : '') +
+            '<div><b>prompt</b> ' + esc(prompt || '(no prompt)') + '</div>' +
+          '</div></div>' +
       '</div>' +
       '<div class="rside">' +
         '<div class="cost">' + fmtCost(t?.costUsd ?? t?.result?.costUsd) + '</div>' +
@@ -1466,22 +1479,26 @@ function renderTranscript(lines){
   return out.join('');
 }
 function openDrawer(id, title){
+  const requestedId = String(id || '');
+  drawerTaskId = requestedId;
   lastFocus = document.activeElement;
   $('#dTitle').textContent = title || 'Transcript';
-  $('#dId').textContent = id || '';
+  $('#dId').textContent = requestedId;
   $('#dbody').innerHTML = '<div class="tlempty">Loading transcript</div>';
   $('#drawer').classList.add('open');
   $('#scrim').classList.add('show');
   $('#dclose').focus({preventScroll: true});
-  fetch('/api/log/' + encodeURIComponent(id) + '?lines=200', {cache: 'no-store'})
+  fetch('/api/log/' + encodeURIComponent(requestedId) + '?lines=200', {cache: 'no-store'})
     .then(r => r.ok ? r.json() : Promise.reject(new Error('http ' + r.status)))
     .then(j => {
+      if (drawerTaskId !== requestedId) return;
       const lines = Array.isArray(j?.lines) ? j.lines : [];
       const body = $('#dbody');
       body.innerHTML = lines.length ? renderTranscript(lines) : '<div class="tlempty">Transcript is empty.</div>';
       body.scrollTop = body.scrollHeight;
     })
     .catch(() => {
+      if (drawerTaskId !== requestedId) return;
       const body = $('#dbody');
       if (mockActive && !liveEverOk) {
         body.innerHTML = renderTranscript(MOCK_LOG);
@@ -1492,6 +1509,7 @@ function openDrawer(id, title){
     });
 }
 function closeDrawer(){
+  drawerTaskId = null;
   $('#drawer').classList.remove('open');
   if (!$('#newPanel').classList.contains('open')) $('#scrim').classList.remove('show');
   if (lastFocus && lastFocus.isConnected) lastFocus.focus({preventScroll: true});
@@ -1526,6 +1544,9 @@ function tick(){
 
 /* ================= wiring ================= */
 function init(){
+  $('#loopDivider').hidden = !FEATURES.loop;
+  $('#loopForm').hidden = !FEATURES.loop;
+  $('#msgForm').hidden = !FEATURES.message;
   buildThemeMenu();
   if (THEME_IDS.indexOf(document.documentElement.getAttribute('data-theme')) < 0) setTheme('tokyo-night');
   markTheme();
@@ -1598,6 +1619,7 @@ function init(){
 
   $('#msgForm').addEventListener('submit', async e => {
     e.preventDefault();
+    if (!FEATURES.message) return;
     const inp = $('#msgText');
     const text = inp.value.trim();
     if (!text) return;
@@ -1606,6 +1628,8 @@ function init(){
   });
   $('#taskForm').addEventListener('submit', async e => {
     e.preventDefault();
+    const submit = e.currentTarget.querySelector('button[type="submit"]');
+    if (!submit || submit.disabled) return;
     const body = {title: $('#tTitle').value.trim(), prompt: $('#tPrompt').value.trim()};
     if (!body.title || !body.prompt) return;
     const cwd = $('#tCwd').value.trim();
@@ -1614,15 +1638,18 @@ function init(){
     if (cwd) body.cwd = cwd;
     if (model) body.model = model;
     if (engine) body.engine = engine;
+    submit.disabled = true;
     try {
       const j = await post('/api/dispatch', body);
       flash($('#taskMsg'), 'queued ' + (j?.id || 'ok'));
       $('#tTitle').value = ''; $('#tPrompt').value = '';
       poll();
     } catch (err) { flash($('#taskMsg'), err.message, true); }
+    finally { submit.disabled = false; }
   });
   $('#loopForm').addEventListener('submit', async e => {
     e.preventDefault();
+    if (!FEATURES.loop) return;
     const project = $('#lProject').value.trim();
     if (!project) return;
     const body = {project};
