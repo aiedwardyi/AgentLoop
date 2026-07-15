@@ -1,0 +1,6 @@
+{
+  "dashboardPort": 5757,
+  "maxConcurrent": 2,
+  "taskTimeoutMin": 45,
+  "defaultEngine": "codex"
+}
