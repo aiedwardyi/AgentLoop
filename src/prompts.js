@@ -57,13 +57,13 @@ function parseLoopResult(text) {
   const lines = String(text || '').split(/\r?\n/);
 
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const marker = lines[index].indexOf('LOOP_RESULT');
+    const line = lines[index].trim();
 
-    if (marker === -1) {
+    if (!line.startsWith('LOOP_RESULT')) {
       continue;
     }
 
-    const json = matchObject(lines[index], marker + 'LOOP_RESULT'.length);
+    const json = matchObject(line, 'LOOP_RESULT'.length);
 
     if (!json) {
       continue;

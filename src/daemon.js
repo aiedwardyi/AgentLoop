@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 
 const store = require('./store');
 const { taskPrompt, parseLoopResult } = require('./prompts');
@@ -10,10 +10,12 @@ const { taskPrompt, parseLoopResult } = require('./prompts');
 const pollMs = 1500;
 const maxResultText = 20000;
 const runningActivity = new Map();
+const activeWorkers = new Map();
 
 let daemonInfo;
 let server;
 let ticker;
+let stopping = false;
 
 function taskTime(task, field) {
   const value = Date.parse(task[field]);
@@ -148,6 +150,28 @@ function terminateWorker(child) {
   }
 }
 
+function stopWorker(child) {
+  if (!child.pid) {
+    return;
+  }
+
+  if (process.platform === 'win32') {
+    try {
+      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch {
+    }
+    return;
+  }
+
+  try {
+    child.kill('SIGTERM');
+  } catch {
+  }
+}
+
 function readWorkerOutput(outputPath, fallback) {
   try {
     const output = fs.readFileSync(outputPath, 'utf8');
@@ -181,8 +205,11 @@ function completeTask(task, details) {
   const finishedAt = new Date().toISOString();
   const startedAt = taskTime(task, 'startedAt');
   const parsed = parseLoopResult(details.resultText);
-  const invalidLoopResult = !details.forceFailed && !details.timedOut && !parsed;
-  const status = details.forceFailed || details.timedOut || invalidLoopResult
+  const workerExitedNonzero = !details.forceFailed && !details.timedOut
+    && (details.exitCode !== 0 || details.signal);
+  const invalidLoopResult = !details.forceFailed && !details.timedOut
+    && !workerExitedNonzero && !parsed;
+  const status = details.forceFailed || details.timedOut || workerExitedNonzero || invalidLoopResult
     ? 'failed'
     : parsed.status;
   const result = {
@@ -195,6 +222,7 @@ function completeTask(task, details) {
         : fallbackSummary(details.resultText, status, details.timedOut),
     resultText: trimResult(details.resultText),
     exitCode: details.exitCode,
+    ...(workerExitedNonzero ? { reason: 'worker_exited_nonzero' } : {}),
     durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
     finishedAt,
   };
@@ -208,7 +236,9 @@ function completeTask(task, details) {
     store.writeResult(result);
     store.writeTask(completedTask, 'running');
     store.moveTask(task.id, 'running', 'done');
-    if (invalidLoopResult) {
+    if (workerExitedNonzero) {
+      store.appendEvent('fail', { id: task.id, reason: 'worker_exited_nonzero', code: details.exitCode });
+    } else if (invalidLoopResult) {
       store.appendEvent('fail', { id: task.id, reason: 'invalid_loop_result' });
     } else {
       store.appendEvent('done', { id: task.id, status });
@@ -256,6 +286,7 @@ function spawnWorker(task) {
   let timedOut = false;
   let settled = false;
   let timeout;
+  activeWorkers.set(task.id, { child, timeout: null });
   const captureLine = (line) => {
     const text = recordActivity(task.id, line);
 
@@ -263,16 +294,18 @@ function spawnWorker(task) {
       lastTextLine = text;
     }
   };
-  const finish = (exitCode) => {
-    if (settled) {
+  const finish = (exitCode, signal, forceFailed = false) => {
+    if (settled || stopping) {
       return;
     }
 
     settled = true;
     clearTimeout(timeout);
+    activeWorkers.delete(task.id);
     completeTask(task, {
       exitCode,
-      forceFailed: false,
+      signal,
+      forceFailed,
       resultText: readWorkerOutput(outputPath, lastTextLine),
       timedOut,
     });
@@ -282,9 +315,9 @@ function spawnWorker(task) {
   streamLines(child.stderr, captureLine);
   child.once('error', (error) => {
     lastTextLine = `Worker error: ${error.message}`;
-    finish(null);
+    finish(null, null, true);
   });
-  child.once('close', (code) => finish(code));
+  child.once('close', (code, signal) => finish(code, signal));
   child.stdin.on('error', (error) => {
     lastTextLine = `Worker input error: ${error.message}`;
   });
@@ -295,12 +328,13 @@ function spawnWorker(task) {
     lastTextLine = `Worker timed out after ${timeoutMinutes} minutes.`;
     terminateWorker(child);
   }, timeoutMinutes * 60 * 1000);
+  activeWorkers.get(task.id).timeout = timeout;
 
   try {
     child.stdin.end(taskPrompt(task));
   } catch (error) {
     lastTextLine = `Worker input error: ${error.message}`;
-    finish(null);
+    finish(null, null, true);
   }
 }
 
@@ -490,6 +524,18 @@ function tick() {
 }
 
 function stop() {
+  stopping = true;
+  const workers = [...activeWorkers.values()];
+
+  for (const worker of workers) {
+    clearTimeout(worker.timeout);
+  }
+
+  for (const worker of workers) {
+    stopWorker(worker.child);
+  }
+
+  activeWorkers.clear();
   clearInterval(ticker);
 
   if (server) {
@@ -522,6 +568,10 @@ function start() {
     stop();
   });
   server.listen(daemonInfo.port, '127.0.0.1', () => {
+    if (stopping) {
+      return;
+    }
+
     console.log(`Dashboard: http://127.0.0.1:${daemonInfo.port}`);
     ticker = setInterval(tick, pollMs);
     tick();
