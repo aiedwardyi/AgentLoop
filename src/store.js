@@ -169,11 +169,66 @@ function appendEvent(type, dataObj = {}) {
   return event;
 }
 
-function writeHeartbeat(heartbeat) {
-  const value = {
+function heartbeatValue(heartbeat) {
+  return {
     ...heartbeat,
     ts: new Date().toISOString(),
   };
+}
+
+function writeExclusiveHeartbeat(value) {
+  let fd;
+
+  try {
+    fd = fs.openSync(paths.daemon, 'wx');
+    fs.writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+  }
+}
+
+function acquireHeartbeat(heartbeat) {
+  ensureDirs();
+  const value = heartbeatValue(heartbeat);
+
+  try {
+    writeExclusiveHeartbeat(value);
+    return true;
+  } catch (error) {
+    if (error.code !== 'EEXIST') {
+      throw error;
+    }
+  }
+
+  const existing = readHeartbeat();
+
+  if (isAlive(existing)) {
+    return false;
+  }
+
+  try {
+    fs.unlinkSync(paths.daemon);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  try {
+    writeExclusiveHeartbeat(value);
+    return true;
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function writeHeartbeat(heartbeat) {
+  const value = heartbeatValue(heartbeat);
 
   ensureDirs();
   writeJsonAtomic(paths.daemon, value);
@@ -188,8 +243,7 @@ function readHeartbeat() {
   }
 }
 
-function isAlive() {
-  const heartbeat = readHeartbeat();
+function isAlive(heartbeat = readHeartbeat()) {
   const timestamp = heartbeat && Date.parse(heartbeat.ts);
   const pid = heartbeat && Number(heartbeat.pid);
 
@@ -220,6 +274,7 @@ module.exports = {
   listTasks,
   writeResult,
   appendEvent,
+  acquireHeartbeat,
   writeHeartbeat,
   readHeartbeat,
   isAlive,

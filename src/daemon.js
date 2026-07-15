@@ -495,18 +495,16 @@ function stop() {
 function start() {
   store.ensureDirs();
 
-  if (store.isAlive()) {
-    console.log('AgentLoop daemon is already running.');
-    process.exitCode = 1;
-    return;
-  }
-
   daemonInfo = {
     pid: process.pid,
     port: store.config.dashboardPort,
     startedAt: new Date().toISOString(),
   };
-  store.writeHeartbeat(daemonInfo);
+
+  if (!store.acquireHeartbeat(daemonInfo)) {
+    console.log('AgentLoop daemon is already running.');
+    return;
+  }
 
   server = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
