@@ -57,7 +57,7 @@ function parseLoopResult(text) {
   const lines = String(text || '').split(/\r?\n/);
 
   for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const marker = lines[index].lastIndexOf('LOOP_RESULT');
+    const marker = lines[index].indexOf('LOOP_RESULT');
 
     if (marker === -1) {
       continue;

@@ -523,10 +523,10 @@ function start() {
   });
   server.listen(daemonInfo.port, '127.0.0.1', () => {
     console.log(`Dashboard: http://127.0.0.1:${daemonInfo.port}`);
+    ticker = setInterval(tick, pollMs);
+    tick();
   });
 
-  ticker = setInterval(tick, pollMs);
-  tick();
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
 }

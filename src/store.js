@@ -208,6 +208,20 @@ function acquireHeartbeat(heartbeat) {
     return false;
   }
 
+  if (!existing) {
+    let age;
+
+    try {
+      age = Date.now() - fs.statSync(paths.daemon).mtimeMs;
+    } catch {
+      return false;
+    }
+
+    if (!Number.isFinite(age) || age < 15000) {
+      return false;
+    }
+  }
+
   try {
     fs.unlinkSync(paths.daemon);
   } catch (error) {
