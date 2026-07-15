@@ -180,18 +180,19 @@ function fallbackSummary(text, status, timedOut) {
 function completeTask(task, details) {
   const finishedAt = new Date().toISOString();
   const startedAt = taskTime(task, 'startedAt');
-  const parsed = details.forceFailed || details.timedOut
-    ? null
-    : parseLoopResult(details.resultText);
-  const status = details.forceFailed || details.timedOut
+  const parsed = parseLoopResult(details.resultText);
+  const invalidLoopResult = !details.forceFailed && !details.timedOut && !parsed;
+  const status = details.forceFailed || details.timedOut || invalidLoopResult
     ? 'failed'
-    : parsed ? parsed.status : details.exitCode === 0 ? 'done' : 'failed';
+    : parsed.status;
   const result = {
     id: task.id,
     status,
-    summary: parsed && parsed.summary
-      ? parsed.summary
-      : fallbackSummary(details.resultText, status, details.timedOut),
+    summary: invalidLoopResult
+      ? 'worker exited without a valid LOOP_RESULT'
+      : parsed && parsed.summary
+        ? parsed.summary
+        : fallbackSummary(details.resultText, status, details.timedOut),
     resultText: trimResult(details.resultText),
     exitCode: details.exitCode,
     durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
@@ -207,7 +208,11 @@ function completeTask(task, details) {
     store.writeResult(result);
     store.writeTask(completedTask, 'running');
     store.moveTask(task.id, 'running', 'done');
-    store.appendEvent('done', { id: task.id, status });
+    if (invalidLoopResult) {
+      store.appendEvent('fail', { id: task.id, reason: 'invalid_loop_result' });
+    } else {
+      store.appendEvent('done', { id: task.id, status });
+    }
   } catch (error) {
     console.error(`Failed to finish ${task.id}: ${error.message}`);
   } finally {
