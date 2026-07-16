@@ -187,15 +187,19 @@ function readLogLines(id, limit = 200) {
 }
 
 function appendEvent(type, dataObj = {}) {
-  ensureDirs();
-  const event = {
-    ...(dataObj && typeof dataObj === 'object' ? dataObj : {}),
-    type,
-    ts: new Date().toISOString(),
-  };
+  try {
+    ensureDirs();
+    const event = {
+      ...(dataObj && typeof dataObj === 'object' ? dataObj : {}),
+      type,
+      ts: new Date().toISOString(),
+    };
 
-  fs.appendFileSync(paths.events, `${JSON.stringify(event)}\n`, 'utf8');
-  return event;
+    fs.appendFileSync(paths.events, `${JSON.stringify(event)}\n`, 'utf8');
+    return event;
+  } catch {
+    return null;
+  }
 }
 
 function heartbeatValue(heartbeat) {

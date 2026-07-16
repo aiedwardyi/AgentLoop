@@ -10,6 +10,7 @@ const { taskPrompt, parseLoopResult } = require('./prompts');
 const pollMs = 1500;
 const maxResultText = 20000;
 const maxLogLines = 1000;
+const maxEventBytes = 16 * 1024;
 const runningActivity = new Map();
 const activeWorkers = new Map();
 
@@ -541,7 +542,7 @@ function dashboardEvent(event) {
   }
 
   if (event.type === 'cancel') {
-    return { ...value, text: `${task} cancelled${reason}` };
+    return { ...value, kind: 'info', text: `${task} cancelled${reason}` };
   }
 
   return { ...value, text: typeof event.type === 'string' ? event.type : value.text };
@@ -549,7 +550,28 @@ function dashboardEvent(event) {
 
 function recentEvents() {
   try {
-    const lines = fs.readFileSync(store.paths.events, 'utf8').split(/\r?\n/);
+    const size = fs.statSync(store.paths.events).size;
+
+    if (!size) {
+      return [];
+    }
+
+    const length = Math.min(size, maxEventBytes);
+    const buffer = Buffer.alloc(length);
+    const descriptor = fs.openSync(store.paths.events, 'r');
+    let bytesRead;
+
+    try {
+      bytesRead = fs.readSync(descriptor, buffer, 0, length, size - length);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split(/\r?\n/);
+
+    if (size > length) {
+      lines.shift();
+    }
 
     if (lines[lines.length - 1] === '') {
       lines.pop();
@@ -557,12 +579,15 @@ function recentEvents() {
 
     const events = [];
 
-    for (const line of lines.slice(-30).reverse()) {
+    for (const line of lines.reverse()) {
       try {
         const event = JSON.parse(line);
 
         if (event && typeof event === 'object' && !Array.isArray(event)) {
           events.push(dashboardEvent(event));
+          if (events.length === 30) {
+            break;
+          }
         }
       } catch {
       }
