@@ -1342,8 +1342,11 @@ function hasActiveLoop(projectPath) {
         continue;
       }
 
-      if (path.resolve(task.projectPath) === projectPath) {
-        return true;
+      try {
+        if (fs.realpathSync(task.projectPath) === projectPath) {
+          return true;
+        }
+      } catch {
       }
     }
   }
@@ -1387,16 +1390,28 @@ async function createLoop(req, res) {
     return;
   }
 
-  const projectPath = loopProjectPath(project);
-  const relative = path.relative(store.paths.root, projectPath);
+  const requestedProjectPath = loopProjectPath(project);
 
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    sendJson(res, 400, { error: 'Project folder must be inside the AgentLoop root.' });
+  if (!isDirectory(requestedProjectPath)) {
+    sendJson(res, 400, { error: 'Project folder does not exist.' });
     return;
   }
 
-  if (!isDirectory(projectPath)) {
+  let rootPath;
+  let projectPath;
+
+  try {
+    rootPath = fs.realpathSync(store.paths.root);
+    projectPath = fs.realpathSync(requestedProjectPath);
+  } catch {
     sendJson(res, 400, { error: 'Project folder does not exist.' });
+    return;
+  }
+
+  const relative = path.relative(rootPath, projectPath);
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    sendJson(res, 400, { error: 'Project folder must be inside the AgentLoop root.' });
     return;
   }
 
