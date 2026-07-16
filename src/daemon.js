@@ -214,9 +214,14 @@ function readWorkerOutput(outputPath, fallback) {
   }
 }
 
+function timeoutMinutes() {
+  const value = Number(store.config.taskTimeoutMin);
+  return Number.isFinite(value) ? Math.max(1, value) : 45;
+}
+
 function fallbackSummary(text, status, timedOut) {
   if (timedOut) {
-    return `Worker timed out after ${store.config.taskTimeoutMin} minutes.`;
+    return `Worker timed out after ${timeoutMinutes()} minutes.`;
   }
 
   const lines = String(text || '').trim().split(/\r?\n/).filter(Boolean);
@@ -384,12 +389,12 @@ function spawnWorker(task) {
     captureLine(`Worker input error: ${error.message}`);
   });
 
-  const timeoutMinutes = Math.max(1, Number(store.config.taskTimeoutMin) || 45);
+  const timeoutMin = timeoutMinutes();
   timeout = setTimeout(() => {
     timedOut = true;
-    captureLine(`Worker timed out after ${timeoutMinutes} minutes.`);
+    captureLine(`Worker timed out after ${timeoutMin} minutes.`);
     terminateWorker(child);
-  }, timeoutMinutes * 60 * 1000);
+  }, timeoutMin * 60 * 1000);
   worker.timeout = timeout;
 
   try {
@@ -508,6 +513,67 @@ function dashboardRecentTask(task) {
   return value;
 }
 
+function dashboardEvent(event) {
+  const id = typeof event.id === 'string' ? event.id : '';
+  const task = id ? `task ${id}` : 'task';
+  const reason = typeof event.reason === 'string' ? `: ${event.reason}` : '';
+  const value = {
+    ts: typeof event.ts === 'string' ? event.ts : '',
+    kind: 'info',
+    text: 'activity',
+    ...(id ? { taskId: id } : {}),
+  };
+
+  if (event.type === 'queue') {
+    return { ...value, kind: 'queue', text: `queued ${task}` };
+  }
+
+  if (event.type === 'start') {
+    return { ...value, kind: 'spawn', text: `${task} started` };
+  }
+
+  if (event.type === 'done') {
+    return { ...value, kind: 'result', text: `${task} done` };
+  }
+
+  if (event.type === 'fail') {
+    return { ...value, kind: 'error', text: `${task} failed${reason}` };
+  }
+
+  if (event.type === 'cancel') {
+    return { ...value, text: `${task} cancelled${reason}` };
+  }
+
+  return { ...value, text: typeof event.type === 'string' ? event.type : value.text };
+}
+
+function recentEvents() {
+  try {
+    const lines = fs.readFileSync(store.paths.events, 'utf8').split(/\r?\n/);
+
+    if (lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+
+    const events = [];
+
+    for (const line of lines.slice(-30).reverse()) {
+      try {
+        const event = JSON.parse(line);
+
+        if (event && typeof event === 'object' && !Array.isArray(event)) {
+          events.push(dashboardEvent(event));
+        }
+      } catch {
+      }
+    }
+
+    return events;
+  } catch {
+    return [];
+  }
+}
+
 function daemonState() {
   const pendingTasks = sortPending(store.listTasks('pending'));
   const runningTasks = store.listTasks('running');
@@ -545,7 +611,7 @@ function daemonState() {
       recent,
     },
     messages: [],
-    events: [],
+    events: recentEvents(),
   };
 }
 
@@ -628,6 +694,7 @@ async function dispatch(req, res) {
     priority: body.priority,
     source: 'api',
   });
+  store.appendEvent('queue', { id: task.id });
 
   sendJson(res, 201, { id: task.id });
 }
