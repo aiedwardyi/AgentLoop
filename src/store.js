@@ -123,6 +123,23 @@ function enqueueTask(partial = {}) {
   return task;
 }
 
+function enqueueLoop(partial = {}) {
+  const input = partial && typeof partial === 'object' ? partial : {};
+  const loop = {
+    ...input,
+    id: `t-${crypto.randomBytes(4).toString('hex')}`,
+    type: 'loop',
+    title: input.title || `loop: ${input.project || 'untitled'}`,
+    priority: input.priority ?? 5,
+    cycles: Array.isArray(input.cycles) ? input.cycles : [],
+    createdAt: new Date().toISOString(),
+    source: input.source || 'api',
+  };
+
+  writeTask(loop, 'pending');
+  return loop;
+}
+
 function moveTask(id, fromStage, toStage) {
   ensureDirs();
   moveFile(taskPath(id, fromStage), taskPath(id, toStage));
@@ -315,6 +332,7 @@ module.exports = {
   paths,
   ensureDirs,
   enqueueTask,
+  enqueueLoop,
   moveTask,
   readTask,
   writeTask,
