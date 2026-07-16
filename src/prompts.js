@@ -123,7 +123,7 @@ function parseLoopResult(text) {
 function parseCriticVerdict(text) {
   const lines = String(text || '').split(/\r?\n/);
 
-  while (lines.length && lines[lines.length - 1] === '') {
+  while (lines.length && !lines[lines.length - 1].trim()) {
     lines.pop();
   }
 

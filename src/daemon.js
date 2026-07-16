@@ -250,6 +250,10 @@ function timeoutMinutes() {
 }
 
 function loopCycles(value) {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+    return defaultLoopCycles;
+  }
+
   const parsed = Number(value);
 
   if (!Number.isFinite(parsed)) {
