@@ -242,10 +242,10 @@ function completeTask(task, details) {
 
   if (cancelled) {
     reason = 'cancelled';
-  } else if (details.reason) {
-    reason = details.reason;
   } else if (details.timedOut) {
     reason = 'timed_out';
+  } else if (details.reason) {
+    reason = details.reason;
   } else if (details.forceFailed) {
     reason = 'worker_failed';
   } else if (workerExitedNonzero) {
@@ -262,6 +262,8 @@ function completeTask(task, details) {
     status,
     summary: cancelled
       ? 'Cancelled.'
+      : details.timedOut
+      ? fallbackSummary(details.resultText, status, true)
       : invalidLoopResult
       ? 'worker exited without a valid LOOP_RESULT'
       : parsed && parsed.summary
@@ -363,7 +365,7 @@ function spawnWorker(task) {
       exitCode,
       signal,
       forceFailed,
-      reason: reason || (inputFailed ? 'worker_input_failed' : undefined),
+      reason: timedOut ? 'timed_out' : reason || (inputFailed ? 'worker_input_failed' : undefined),
       resultText: readWorkerOutput(outputPath, lastTextLine),
       timedOut,
       cancelled: worker.cancelled,
