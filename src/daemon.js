@@ -5,12 +5,21 @@ const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 
 const store = require('./store');
-const { taskPrompt, parseLoopResult } = require('./prompts');
+const {
+  taskPrompt,
+  loopWorkerPrompt,
+  criticPrompt,
+  parseLoopResult,
+  parseCriticVerdict,
+} = require('./prompts');
 
 const pollMs = 1500;
 const maxResultText = 20000;
 const maxLogLines = 1000;
 const maxEventBytes = 16 * 1024;
+const knownEngines = new Set(['codex']);
+const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', 'maxed', 'plan_complete']);
+const defaultLoopCycles = 3;
 const runningActivity = new Map();
 const activeWorkers = new Map();
 
@@ -104,6 +113,14 @@ function recordActivity(id, line) {
   return text;
 }
 
+function recordEvent(type, data) {
+  try {
+    store.appendEvent(type, data);
+  } catch (error) {
+    console.error(`Failed to append ${type} event: ${error.message}`);
+  }
+}
+
 function streamLines(stream, onLine) {
   let buffered = '';
   stream.setEncoding('utf8');
@@ -156,6 +173,11 @@ function spawnCodex(args, options) {
   return spawn(executable, args, options);
 }
 
+function taskkillPath() {
+  const windowsRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
+  return path.join(windowsRoot, 'System32', 'taskkill.exe');
+}
+
 function terminateWorker(child) {
   if (!child.pid) {
     return;
@@ -163,12 +185,19 @@ function terminateWorker(child) {
 
   if (process.platform === 'win32') {
     try {
-      const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+      const killer = spawnSync(taskkillPath(), ['/pid', String(child.pid), '/T', '/F'], {
         stdio: 'ignore',
         windowsHide: true,
       });
-      killer.on('error', () => {});
+
+      if (killer.status !== 0) {
+        child.kill('SIGKILL');
+      }
     } catch {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+      }
     }
     return;
   }
@@ -186,7 +215,7 @@ function stopWorker(child) {
 
   if (process.platform === 'win32') {
     try {
-      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+      spawnSync(taskkillPath(), ['/pid', String(child.pid), '/T', '/F'], {
         stdio: 'ignore',
         windowsHide: true,
       });
@@ -218,6 +247,93 @@ function readWorkerOutput(outputPath, fallback) {
 function timeoutMinutes() {
   const value = Number(store.config.taskTimeoutMin);
   return Number.isFinite(value) ? Math.max(1, value) : 45;
+}
+
+function loopCycles(value) {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+    return defaultLoopCycles;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed)) {
+    return defaultLoopCycles;
+  }
+
+  return Math.min(10, Math.max(1, Math.trunc(parsed)));
+}
+
+function cycleLogId(loopId, cycleNumber, role) {
+  return `${loopId}-cycle-${cycleNumber}-${role}`;
+}
+
+function readRunningLoop(id) {
+  try {
+    const loop = store.readTask(id, 'running');
+    return loop && loop.type === 'loop' ? loop : null;
+  } catch {
+    return null;
+  }
+}
+
+function updateCycle(loop, cycleNumber, fields) {
+  const cycles = Array.isArray(loop.cycles) ? loop.cycles : [];
+
+  return {
+    ...loop,
+    cycles: cycles.map((cycle) => (
+      cycle && cycle.n === cycleNumber ? { ...cycle, ...fields } : cycle
+    )),
+  };
+}
+
+function currentCycle(loop, cycleNumber) {
+  const cycles = Array.isArray(loop.cycles) ? loop.cycles : [];
+  return cycles.find((cycle) => cycle && cycle.n === cycleNumber) || null;
+}
+
+function workerFailureReason(details, parsed) {
+  if (details.timedOut) {
+    return 'timed_out';
+  }
+
+  if (details.reason) {
+    return details.reason;
+  }
+
+  if (details.forceFailed) {
+    return 'worker_failed';
+  }
+
+  if (details.exitCode !== 0 || details.signal) {
+    return 'worker_exited_nonzero';
+  }
+
+  if (!parsed) {
+    return 'invalid_loop_result';
+  }
+
+  return parsed.status === 'failed' ? 'worker_reported_failure' : null;
+}
+
+function criticFailureReason(details, verdict) {
+  if (details.timedOut) {
+    return 'critic_timed_out';
+  }
+
+  if (details.reason) {
+    return details.reason;
+  }
+
+  if (details.forceFailed) {
+    return 'critic_failed';
+  }
+
+  if (details.exitCode !== 0 || details.signal) {
+    return 'critic_exited_nonzero';
+  }
+
+  return verdict ? null : 'critic_invalid_verdict';
 }
 
 function fallbackSummary(text, status, timedOut) {
@@ -293,16 +409,509 @@ function completeTask(task, details) {
     store.writeTask(completedTask, 'running');
     store.moveTask(task.id, 'running', 'done');
     if (status === 'cancelled') {
-      store.appendEvent('cancel', { id: task.id, reason });
+      recordEvent('cancel', { id: task.id, reason });
     } else if (status === 'failed') {
-      store.appendEvent('fail', { id: task.id, reason, ...(workerExitedNonzero ? { code: details.exitCode } : {}) });
+      recordEvent('fail', { id: task.id, reason, ...(workerExitedNonzero ? { code: details.exitCode } : {}) });
     } else {
-      store.appendEvent('done', { id: task.id, status });
+      recordEvent('done', { id: task.id, status });
     }
   } catch (error) {
     console.error(`Failed to finish ${task.id}: ${error.message}`);
   } finally {
     runningActivity.delete(task.id);
+  }
+}
+
+function completeLoop(loop, status, summary, reason) {
+  const finishedAt = new Date().toISOString();
+  const startedAt = taskTime(loop, 'startedAt');
+  const completedLoop = {
+    ...loop,
+    status,
+    summary,
+    finishedAt,
+    ...(reason ? { reason } : {}),
+  };
+  let completed = completedLoop;
+
+  try {
+    store.writeTask(completed, 'running');
+    store.moveTask(loop.id, 'running', 'done');
+  } catch (error) {
+    console.error(`Failed to finish ${loop.id}: ${error.message}`);
+    completed = {
+      ...loop,
+      status: 'failed',
+      summary: 'Loop completion failed.',
+      finishedAt,
+      reason: 'loop_completion_failed',
+    };
+
+    try {
+      store.writeTask(completed, 'running');
+      store.moveTask(loop.id, 'running', 'done');
+    } catch (fallbackError) {
+      console.error(`Failed to mark ${loop.id} as failed: ${fallbackError.message}`);
+    }
+  }
+
+  try {
+    store.writeResult({
+      id: loop.id,
+      status: completed.status,
+      summary: completed.summary,
+      durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
+      finishedAt,
+      ...(completed.reason ? { reason: completed.reason } : {}),
+    });
+  } catch (error) {
+    console.error(`Failed to write result for ${loop.id}: ${error.message}`);
+  }
+
+  recordEvent('loop_ended', {
+    id: loop.id,
+    status: completed.status,
+    ...(completed.reason ? { reason: completed.reason } : {}),
+  });
+
+  runningActivity.delete(loop.id);
+
+  return completed;
+}
+
+function appendLoopLog(loop, line) {
+  try {
+    store.appendLogLine(loop.id, line);
+  } catch (error) {
+    console.error(`Failed to write loop log for ${loop.id}: ${error.message}`);
+  }
+}
+
+function appendSessionLog(loop, cycle, role, line) {
+  const logId = role === 'worker' ? cycle.workerLogId : cycle.criticLogId;
+
+  if (logId) {
+    try {
+      store.appendLogLine(logId, line);
+    } catch (error) {
+      console.error(`Failed to write ${role} log for cycle ${cycle.n}: ${error.message}`);
+    }
+  }
+
+  appendLoopLog(loop, line);
+}
+
+function appendSessionResult(loop, cycle, role, resultText) {
+  const text = String(resultText || '').trim();
+
+  if (text) {
+    appendSessionLog(loop, cycle, role, text);
+  }
+}
+
+function failLoopTransition(loop, cycleNumber, error) {
+  const current = readRunningLoop(loop.id) || loop;
+  const cycle = currentCycle(current, cycleNumber);
+  const finishedAt = new Date().toISOString();
+  const startedAt = cycle ? taskTime(cycle, 'startedAt') : taskTime(current, 'startedAt');
+  const failed = updateCycle(current, cycleNumber, {
+    status: 'failed',
+    summary: `Cycle ${cycleNumber} transition failed.`,
+    finishedAt,
+    durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
+    reason: 'cycle_transition_failed',
+  });
+
+  completeLoop(failed, 'failed', `Cycle ${cycleNumber} transition failed.`, 'cycle_transition_failed');
+  console.error(`Failed to transition cycle ${cycleNumber} for ${loop.id}: ${error.message}`);
+}
+
+function finishLoopSession(loop, cycle, onFinish, details) {
+  try {
+    onFinish(details);
+  } catch (error) {
+    failLoopTransition(loop, cycle.n, error);
+  }
+}
+
+function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
+  const model = loop.model || store.config.model || 'gpt-5.6-terra';
+  const cwd = loop.projectPath;
+  const outputPath = path.join(
+    store.paths.results,
+    `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`,
+  );
+  const args = [
+    'exec',
+    '--json',
+    '--dangerously-bypass-approvals-and-sandbox',
+    '--skip-git-repo-check',
+    '--output-last-message', outputPath,
+    '--model', model,
+    '-',
+  ];
+  let child;
+
+  appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} ===`);
+
+  try {
+    child = spawnCodex(args, {
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+  } catch (error) {
+    finishLoopSession(loop, cycle, onFinish, {
+      exitCode: null,
+      forceFailed: true,
+      reason: `${role}_start_failed`,
+      resultText: `${role} failed to start: ${error.message}`,
+      timedOut: false,
+      cancelled: false,
+    });
+    return;
+  }
+
+  let lastTextLine = '';
+  let inputFailed = false;
+  let timedOut = false;
+  let settled = false;
+  let timeout;
+  const worker = { child, timeout: null, cancelled: false, type: 'loop', role };
+  activeWorkers.set(loop.id, worker);
+  const captureLine = (line) => {
+    appendSessionLog(loop, cycle, role, line);
+
+    const text = recordActivity(loop.id, line);
+
+    if (text) {
+      lastTextLine = text;
+    }
+  };
+  const finish = (exitCode, signal, forceFailed = false, reason) => {
+    if (settled || stopping) {
+      return;
+    }
+
+    settled = true;
+    clearTimeout(timeout);
+
+    if (activeWorkers.get(loop.id) === worker) {
+      activeWorkers.delete(loop.id);
+    }
+
+    finishLoopSession(loop, cycle, onFinish, {
+      exitCode,
+      signal,
+      forceFailed,
+      reason: timedOut ? `${role}_timed_out` : reason || (inputFailed ? `${role}_input_failed` : undefined),
+      resultText: readWorkerOutput(outputPath, lastTextLine),
+      timedOut,
+      cancelled: worker.cancelled,
+    });
+  };
+
+  streamLines(child.stdout, captureLine);
+  streamLines(child.stderr, captureLine);
+  child.once('error', (error) => {
+    captureLine(`${role} error: ${error.message}`);
+    finish(null, null, true, `${role}_error`);
+  });
+  child.once('close', (code, signal) => finish(code, signal));
+  child.stdin.on('error', (error) => {
+    inputFailed = true;
+    captureLine(`${role} input error: ${error.message}`);
+  });
+
+  const timeoutMin = timeoutMinutes();
+  timeout = setTimeout(() => {
+    timedOut = true;
+    captureLine(`${role} timed out after ${timeoutMin} minutes.`);
+    terminateWorker(child);
+  }, timeoutMin * 60 * 1000);
+  worker.timeout = timeout;
+
+  try {
+    child.stdin.end(prompt);
+  } catch (error) {
+    captureLine(`${role} input error: ${error.message}`);
+    finish(null, null, true, `${role}_input_failed`);
+  }
+}
+
+function startLoopCycle(loop) {
+  if (loop.cancelRequested) {
+    completeLoop(loop, 'cancelled', 'Cancelled.', 'cancelled');
+    return;
+  }
+
+  const cycles = Array.isArray(loop.cycles) ? loop.cycles : [];
+  const cycleNumber = cycles.length + 1;
+
+  if (cycleNumber > loop.maxCycles) {
+    completeLoop(loop, 'maxed', 'Reached the maximum cycle count without a passing verdict.');
+    return;
+  }
+
+  const previous = cycles[cycles.length - 1];
+  const startedAt = new Date().toISOString();
+  const cycle = {
+    n: cycleNumber,
+    status: 'running',
+    phase: 'worker',
+    startedAt,
+    workerLogId: cycleLogId(loop.id, cycleNumber, 'worker'),
+    criticLogId: cycleLogId(loop.id, cycleNumber, 'critic'),
+  };
+  const runningLoop = {
+    ...loop,
+    status: 'running',
+    cycle: cycleNumber,
+    cycles: [...cycles, cycle],
+    lastActivity: `Cycle ${cycleNumber} worker starting.`,
+  };
+
+  try {
+    store.writeTask(runningLoop, 'running');
+    recordEvent('cycle_started', { id: loop.id, cycle: cycleNumber });
+    runningActivity.set(loop.id, { ts: startedAt, text: runningLoop.lastActivity, toolCalls: 0 });
+    spawnLoopSession(
+      runningLoop,
+      cycle,
+      'worker',
+      loopWorkerPrompt(runningLoop, previous && previous.fixes),
+      (details) => finishLoopWorker(runningLoop, cycleNumber, details),
+    );
+  } catch (error) {
+    completeLoop(runningLoop, 'failed', `Cycle ${cycleNumber} failed to start.`, 'cycle_start_failed');
+    console.error(`Failed to start cycle ${cycleNumber} for ${loop.id}: ${error.message}`);
+  }
+}
+
+function finishLoopWorker(loop, cycleNumber, details) {
+  const current = readRunningLoop(loop.id);
+
+  if (!current) {
+    return;
+  }
+
+  try {
+    const cycle = currentCycle(current, cycleNumber);
+
+    if (!cycle) {
+      completeLoop(current, 'failed', `Cycle ${cycleNumber} is missing.`, 'cycle_missing');
+      return;
+    }
+
+    appendSessionResult(loop, cycle, 'worker', details.resultText);
+    const finishedAt = new Date().toISOString();
+    const durationMs = taskTime(cycle, 'startedAt') ? Math.max(0, Date.now() - taskTime(cycle, 'startedAt')) : 0;
+
+    if (details.cancelled || current.cancelRequested) {
+      const cancelled = updateCycle(current, cycleNumber, {
+        status: 'cancelled',
+        phase: 'worker',
+        finishedAt,
+        durationMs,
+      });
+      completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
+      return;
+    }
+
+    const parsed = parseLoopResult(details.resultText);
+    const reason = workerFailureReason(details, parsed);
+    const workerFields = {
+      workerStatus: reason ? 'failed' : 'done',
+      workerSummary: parsed && parsed.summary ? parsed.summary : fallbackSummary(details.resultText, 'failed', details.timedOut),
+      workerFinishedAt: finishedAt,
+      workerDurationMs: durationMs,
+      workerExitCode: details.exitCode,
+    };
+
+    if (reason) {
+      const failed = updateCycle(current, cycleNumber, {
+        ...workerFields,
+        status: 'failed',
+        phase: 'worker',
+        summary: workerFields.workerSummary,
+        finishedAt,
+        durationMs,
+        reason,
+      });
+      store.writeTask(failed, 'running');
+      recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'failed', reason });
+      completeLoop(failed, 'failed', `Cycle ${cycleNumber} worker failed.`, reason);
+      return;
+    }
+
+    const awaitingCritic = updateCycle(current, cycleNumber, {
+      ...workerFields,
+      status: 'running',
+      phase: 'critic',
+      summary: workerFields.workerSummary || 'Worker finished.',
+    });
+
+    try {
+      store.writeTask(awaitingCritic, 'running');
+      recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'done' });
+      runningActivity.set(loop.id, {
+        ts: finishedAt,
+        text: `Cycle ${cycleNumber} critic starting.`,
+        toolCalls: 0,
+      });
+      spawnLoopSession(
+        awaitingCritic,
+        currentCycle(awaitingCritic, cycleNumber),
+        'critic',
+        criticPrompt(details.resultText),
+        (criticDetails) => finishLoopCritic(awaitingCritic, cycleNumber, criticDetails),
+      );
+    } catch (error) {
+      const invalid = updateCycle(awaitingCritic, cycleNumber, {
+        status: 'critic_invalid',
+        phase: 'critic',
+        summary: 'Critic failed to start.',
+        finishedAt,
+        durationMs,
+        reason: 'critic_start_failed',
+      });
+      completeLoop(invalid, 'failed', `Cycle ${cycleNumber} critic was invalid.`, 'critic_start_failed');
+      console.error(`Failed to start critic for ${loop.id}: ${error.message}`);
+    }
+  } catch (error) {
+    failLoopTransition(current, cycleNumber, error);
+  }
+}
+
+function finishLoopCritic(loop, cycleNumber, details) {
+  const current = readRunningLoop(loop.id);
+
+  if (!current) {
+    return;
+  }
+
+  try {
+    const cycle = currentCycle(current, cycleNumber);
+
+    if (!cycle) {
+      completeLoop(current, 'failed', `Cycle ${cycleNumber} is missing.`, 'cycle_missing');
+      return;
+    }
+
+    appendSessionResult(loop, cycle, 'critic', details.resultText);
+    const finishedAt = new Date().toISOString();
+    const durationMs = taskTime(cycle, 'startedAt') ? Math.max(0, Date.now() - taskTime(cycle, 'startedAt')) : 0;
+
+    if (details.cancelled || current.cancelRequested) {
+      const cancelled = updateCycle(current, cycleNumber, {
+        status: 'cancelled',
+        phase: 'critic',
+        finishedAt,
+        durationMs,
+      });
+      completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
+      return;
+    }
+
+    const verdict = parseCriticVerdict(details.resultText);
+    const reason = criticFailureReason(details, verdict);
+
+    if (reason) {
+      const invalid = updateCycle(current, cycleNumber, {
+        status: 'critic_invalid',
+        phase: 'critic',
+        summary: 'Critic did not produce a valid verdict.',
+        finishedAt,
+        durationMs,
+        reason,
+      });
+      store.writeTask(invalid, 'running');
+      recordEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
+      completeLoop(invalid, 'failed', `Cycle ${cycleNumber} critic was invalid.`, reason);
+      return;
+    }
+
+    if (verdict.verdict === 'PASS') {
+      const passed = updateCycle(current, cycleNumber, {
+        status: 'passed',
+        phase: 'critic',
+        verdict: 'PASS',
+        summary: cycle.workerSummary || 'Critic passed.',
+        finishedAt,
+        durationMs,
+      });
+      store.writeTask(passed, 'running');
+      recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'PASS' });
+      completeLoop(passed, 'passed', `Passed on cycle ${cycleNumber}.`);
+      return;
+    }
+
+    const failed = updateCycle(current, cycleNumber, {
+      status: 'failed',
+      phase: 'critic',
+      verdict: 'FAIL',
+      fixes: verdict.fixes,
+      summary: `Critic failed: ${verdict.fixes}`,
+      finishedAt,
+      durationMs,
+    });
+    store.writeTask(failed, 'running');
+    recordEvent('critic_verdict', {
+      id: loop.id,
+      cycle: cycleNumber,
+      verdict: 'FAIL',
+      fixes: verdict.fixes,
+    });
+
+    if (cycleNumber >= current.maxCycles) {
+      completeLoop(failed, 'maxed', 'Reached the maximum cycle count without a passing verdict.');
+      return;
+    }
+
+    setImmediate(() => {
+      const next = readRunningLoop(loop.id);
+
+      if (!next) {
+        return;
+      }
+
+      if (next.cancelRequested) {
+        completeLoop(next, 'cancelled', 'Cancelled.', 'cancelled');
+        return;
+      }
+
+      startLoopCycle(next);
+    });
+  } catch (error) {
+    failLoopTransition(current, cycleNumber, error);
+  }
+}
+
+function startLoop(loop) {
+  const startedAt = new Date().toISOString();
+  const runningLoop = {
+    ...loop,
+    status: 'running',
+    startedAt,
+    cycle: 0,
+    cycles: Array.isArray(loop.cycles) ? loop.cycles : [],
+  };
+
+  try {
+    store.moveTask(loop.id, 'pending', 'running');
+  } catch (error) {
+    console.error(`Failed to start ${loop.id}: ${error.message}`);
+    return;
+  }
+
+  try {
+    store.writeTask(runningLoop, 'running');
+    recordEvent('loop_started', { id: loop.id });
+    runningActivity.set(loop.id, { ts: startedAt, text: 'Loop starting.', toolCalls: 0 });
+    startLoopCycle(runningLoop);
+  } catch (error) {
+    completeLoop(runningLoop, 'failed', 'Loop failed to start.', 'loop_start_failed');
+    console.error(`Failed to start ${loop.id}: ${error.message}`);
   }
 }
 
@@ -421,7 +1030,7 @@ function startTask(task) {
 
   try {
     store.writeTask(runningTask, 'running');
-    store.appendEvent('start', { id: task.id });
+    recordEvent('start', { id: task.id });
     runningActivity.set(task.id, {
       ts: runningTask.startedAt,
       text: 'Worker starting.',
@@ -451,7 +1060,11 @@ function fillSlots() {
   const pending = sortPending(store.listTasks('pending'));
 
   for (const task of pending.slice(0, slots)) {
-    startTask(task);
+    if (task.type === 'loop') {
+      startLoop(task);
+    } else {
+      startTask(task);
+    }
   }
 }
 
@@ -498,7 +1111,9 @@ function dashboardRecentTask(task) {
   const result = resultForTask(task);
   const value = {
     ...dashboardTask(task),
-    prompt: typeof task.prompt === 'string' ? task.prompt : '',
+    prompt: task.type === 'loop'
+      ? `Project: ${task.project || ''}`
+      : typeof task.prompt === 'string' ? task.prompt : '',
   };
 
   if (!result) {
@@ -517,6 +1132,8 @@ function dashboardRecentTask(task) {
 function dashboardEvent(event) {
   const id = typeof event.id === 'string' ? event.id : '';
   const task = id ? `task ${id}` : 'task';
+  const loop = id ? `loop ${id}` : 'loop';
+  const cycle = Number.isInteger(event.cycle) ? ` cycle ${event.cycle}` : '';
   const reason = typeof event.reason === 'string' ? `: ${event.reason}` : '';
   const value = {
     ts: typeof event.ts === 'string' ? event.ts : '',
@@ -524,6 +1141,39 @@ function dashboardEvent(event) {
     text: 'activity',
     ...(id ? { taskId: id } : {}),
   };
+
+  if (event.type === 'loop_started') {
+    return { ...value, kind: 'spawn', text: `${loop} started` };
+  }
+
+  if (event.type === 'loop_queued') {
+    return { ...value, kind: 'queue', text: `${loop} queued` };
+  }
+
+  if (event.type === 'cycle_started') {
+    return { ...value, kind: 'spawn', text: `${loop}${cycle} started` };
+  }
+
+  if (event.type === 'worker_finished') {
+    const status = event.status === 'done' ? 'finished' : 'failed';
+    return { ...value, kind: event.status === 'done' ? 'result' : 'error', text: `${loop}${cycle} worker ${status}${reason}` };
+  }
+
+  if (event.type === 'critic_verdict') {
+    const verdict = event.verdict === 'PASS' ? 'PASS' : 'FAIL';
+    const fixes = verdict === 'FAIL' && typeof event.fixes === 'string' ? `: ${event.fixes}` : '';
+    return { ...value, kind: verdict === 'PASS' ? 'result' : 'error', text: `${loop}${cycle} critic ${verdict}${fixes}` };
+  }
+
+  if (event.type === 'critic_invalid') {
+    return { ...value, kind: 'error', text: `${loop}${cycle} critic invalid${reason}` };
+  }
+
+  if (event.type === 'loop_ended') {
+    const status = typeof event.status === 'string' ? event.status : 'finished';
+    const kind = status === 'passed' ? 'result' : status === 'failed' ? 'error' : 'info';
+    return { ...value, kind, text: `${loop} ended: ${status}${reason}` };
+  }
 
   if (event.type === 'queue') {
     return { ...value, kind: 'queue', text: `queued ${task}` };
@@ -605,8 +1255,12 @@ function daemonState() {
   const completedTasks = store.listTasks('done');
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const done = completedTasks.filter((task) => task.status === 'done').length;
-  const failed = completedTasks.filter((task) => task.status === 'failed').length;
+  const done = completedTasks.filter((task) => (
+    task.status === 'done' || (task.type === 'loop' && task.status === 'passed')
+  )).length;
+  const failed = completedTasks.filter((task) => (
+    task.status === 'failed' || (task.type === 'loop' && task.status === 'maxed')
+  )).length;
   const finishedToday = completedTasks.filter((task) => taskTime(task, 'finishedAt') >= todayStart.getTime()).length;
   const recent = completedTasks
     .sort((left, right) => taskTime(right, 'finishedAt') - taskTime(left, 'finishedAt'))
@@ -719,9 +1373,150 @@ async function dispatch(req, res) {
     priority: body.priority,
     source: 'api',
   });
-  store.appendEvent('queue', { id: task.id });
+  recordEvent('queue', { id: task.id });
 
   sendJson(res, 201, { id: task.id });
+}
+
+function isDirectory(filePath) {
+  try {
+    return fs.statSync(filePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function isFile(filePath) {
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function loopProjectPath(project) {
+  return path.isAbsolute(project)
+    ? path.resolve(project)
+    : path.resolve(store.paths.root, project);
+}
+
+function hasActiveLoop(projectPath) {
+  for (const stage of ['pending', 'running']) {
+    for (const task of store.listTasks(stage)) {
+      if (task.type !== 'loop' || terminalTaskStatuses.has(task.status) || typeof task.projectPath !== 'string') {
+        continue;
+      }
+
+      try {
+        if (fs.realpathSync(task.projectPath) === projectPath) {
+          return true;
+        }
+      } catch {
+      }
+    }
+  }
+
+  return false;
+}
+
+function seedLoopFiles(projectPath) {
+  const defaults = [
+    [
+      path.join(projectPath, 'STATE.md'),
+      '# State\n\n## Completed\n\n- Nothing yet.\n\n## Next\n\n- Start with the first incomplete plan item.\n\n## Notes\n\n- None.\n',
+    ],
+    [
+      path.join(projectPath, 'GUIDELINES.md'),
+      '# Quality Guidelines\n\n- Meet every requirement in PLAN.md.\n- Keep changes scoped to this project.\n- Validate inputs and relevant edge cases.\n- Add concise usage guidance for runnable work.\n- Run an appropriate check before finishing.\n',
+    ],
+  ];
+
+  for (const [filePath, content] of defaults) {
+    if (!fs.existsSync(filePath)) {
+      fs.writeFileSync(filePath, content, 'utf8');
+    }
+  }
+}
+
+async function createLoop(req, res) {
+  let body;
+
+  try {
+    body = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message });
+    return;
+  }
+
+  const project = body && typeof body.project === 'string' ? body.project.trim() : '';
+
+  if (!project) {
+    sendJson(res, 400, { error: 'project is required.' });
+    return;
+  }
+
+  const requestedProjectPath = loopProjectPath(project);
+
+  if (!isDirectory(requestedProjectPath)) {
+    sendJson(res, 400, { error: 'Project folder does not exist.' });
+    return;
+  }
+
+  let rootPath;
+  let projectPath;
+
+  try {
+    rootPath = fs.realpathSync(store.paths.root);
+    projectPath = fs.realpathSync(requestedProjectPath);
+  } catch {
+    sendJson(res, 400, { error: 'Project folder does not exist.' });
+    return;
+  }
+
+  const relative = path.relative(rootPath, projectPath);
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    sendJson(res, 400, { error: 'Project folder must be inside the AgentLoop root.' });
+    return;
+  }
+
+  if (!isFile(path.join(projectPath, 'PLAN.md'))) {
+    sendJson(res, 400, { error: 'Project folder must contain PLAN.md.' });
+    return;
+  }
+
+  if (hasActiveLoop(projectPath)) {
+    sendJson(res, 400, { error: 'A loop is already running for this project.' });
+    return;
+  }
+
+  const engine = body && typeof body.engine === 'string' && body.engine.trim()
+    ? body.engine.trim()
+    : store.config.defaultEngine;
+
+  if (!knownEngines.has(engine)) {
+    sendJson(res, 400, { error: `Unsupported engine: ${engine}.` });
+    return;
+  }
+
+  try {
+    seedLoopFiles(projectPath);
+  } catch (error) {
+    sendJson(res, 500, { error: `Could not seed loop files: ${error.message}` });
+    return;
+  }
+
+  const loop = store.enqueueLoop({
+    project,
+    projectPath,
+    maxCycles: loopCycles(body && body.maxCycles),
+    engine,
+    model: store.config.model,
+    title: `loop: ${project}`,
+    source: 'api',
+  });
+  recordEvent('loop_queued', { id: loop.id });
+  sendJson(res, 201, { id: loop.id });
 }
 
 function logLineCount(value) {
@@ -736,7 +1531,14 @@ function logLineCount(value) {
 
 function logTaskId(requestPath) {
   try {
-    return decodeURIComponent(requestPath.slice('/api/log/'.length));
+    const decoded = decodeURIComponent(requestPath);
+    const cycle = /^\/api\/log\/([A-Za-z0-9_-]+)\/cycle\/([1-9][0-9]*)\/(worker|critic)$/.exec(decoded);
+
+    if (cycle) {
+      return cycleLogId(cycle[1], Number(cycle[2]), cycle[3]);
+    }
+
+    return decoded.slice('/api/log/'.length);
   } catch {
     return '';
   }
@@ -764,14 +1566,30 @@ async function cancelTask(req, res) {
   }
 
   const id = body && typeof body.id === 'string' ? body.id : '';
-  const worker = activeWorkers.get(id);
 
   if (!id) {
     sendJson(res, 400, { error: 'id is required.' });
     return;
   }
 
+  const worker = activeWorkers.get(id);
+
   if (!worker) {
+    const loop = readRunningLoop(id);
+
+    if (loop) {
+      const cycle = currentCycle(loop, loop.cycle);
+      const cancelled = cycle && cycle.status === 'running'
+        ? updateCycle(loop, loop.cycle, {
+          status: 'cancelled',
+          finishedAt: new Date().toISOString(),
+        })
+        : loop;
+      completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
     sendJson(res, 404, { error: 'Task is not running.' });
     return;
   }
@@ -781,10 +1599,36 @@ async function cancelTask(req, res) {
     return;
   }
 
+  let loop;
+
+  if (worker.type === 'loop') {
+    loop = readRunningLoop(id);
+
+    if (loop) {
+      try {
+        store.writeTask({ ...loop, cancelRequested: true, lastActivity: 'Cancellation requested.' }, 'running');
+      } catch (error) {
+        console.error(`Failed to mark ${id} as cancelled: ${error.message}`);
+      }
+    }
+  }
+
   worker.cancelled = true;
   clearTimeout(worker.timeout);
   worker.timeout = null;
   terminateWorker(worker.child);
+
+  if (loop) {
+    const cycle = currentCycle(loop, loop.cycle);
+    const cancelled = cycle && cycle.status === 'running'
+      ? updateCycle(loop, loop.cycle, {
+        status: 'cancelled',
+        finishedAt: new Date().toISOString(),
+      })
+      : loop;
+    completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
+  }
+
   sendJson(res, 200, { ok: true });
 }
 
@@ -812,12 +1656,17 @@ async function handleRequest(req, res) {
     return;
   }
 
+  if (req.method === 'POST' && requestPath === '/api/loop') {
+    await createLoop(req, res);
+    return;
+  }
+
   if (req.method === 'POST' && requestPath === '/api/cancel') {
     await cancelTask(req, res);
     return;
   }
 
-  if (req.method === 'POST' && ['/api/loop', '/api/answer', '/api/message'].includes(requestPath)) {
+  if (req.method === 'POST' && ['/api/answer', '/api/message'].includes(requestPath)) {
     sendJson(res, 400, { error: 'not enabled' });
     return;
   }
@@ -831,6 +1680,65 @@ function tick() {
     fillSlots();
   } catch (error) {
     console.error(`Daemon tick failed: ${error.message}`);
+  }
+}
+
+function recoverRunningTasks() {
+  for (const task of store.listTasks('running')) {
+    if (terminalTaskStatuses.has(task.status)) {
+      try {
+        store.moveTask(task.id, 'running', 'done');
+      } catch (error) {
+        console.error(`Failed to recover ${task.id}: ${error.message}`);
+      }
+      continue;
+    }
+
+    const finishedAt = new Date().toISOString();
+    const isLoop = task.type === 'loop';
+    const cycles = (Array.isArray(task.cycles) ? task.cycles : []).map((cycle) => (
+      cycle && cycle.status === 'running'
+        ? {
+          ...cycle,
+          status: 'failed',
+          summary: 'Daemon restarted before the cycle finished.',
+          finishedAt,
+          reason: 'daemon_restarted',
+        }
+        : cycle
+    ));
+    const summary = isLoop
+      ? 'Daemon restarted before the loop finished.'
+      : 'Daemon restarted before the task finished.';
+    const recovered = {
+      ...task,
+      ...(isLoop ? { cycles } : {}),
+      status: 'failed',
+      summary,
+      finishedAt,
+      reason: 'daemon_restarted',
+    };
+    const result = {
+      id: task.id,
+      status: 'failed',
+      summary,
+      reason: 'daemon_restarted',
+      durationMs: taskTime(task, 'startedAt') ? Math.max(0, Date.now() - taskTime(task, 'startedAt')) : 0,
+      finishedAt,
+    };
+
+    try {
+      store.writeResult(result);
+      store.writeTask(recovered, 'running');
+      store.moveTask(task.id, 'running', 'done');
+      recordEvent(isLoop ? 'loop_ended' : 'fail', {
+        id: task.id,
+        ...(isLoop ? { status: 'failed' } : {}),
+        reason: 'daemon_restarted',
+      });
+    } catch (error) {
+      console.error(`Failed to recover ${task.id}: ${error.message}`);
+    }
   }
 }
 
@@ -867,6 +1775,8 @@ function start() {
     console.log('AgentLoop daemon is already running.');
     return;
   }
+
+  recoverRunningTasks();
 
   server = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {

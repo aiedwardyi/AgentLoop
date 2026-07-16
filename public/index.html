@@ -720,7 +720,7 @@ form .btn{margin-top:14px}
       <div class="frow">
         <div>
           <label for="lMax">Max cycles</label>
-          <input id="lMax" type="number" min="1" placeholder="30">
+          <input id="lMax" type="number" min="1" max="10" placeholder="3">
         </div>
         <div>
           <label for="lEngine">Engine</label>
@@ -737,7 +737,7 @@ form .btn{margin-top:14px}
 
 <script>
 'use strict';
-const FEATURES = {loop: false, message: false, answer: false};
+const FEATURES = {loop: true, message: false, answer: false};
 /* ================= helpers ================= */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
@@ -1152,7 +1152,8 @@ function segbarHtml(t){
     const c = byN.get(i);
     let cls = 'todo', tip = 'cycle ' + i;
     if (c) {
-      cls = c.status === 'failed' ? 'err'
+      cls = c.status === 'running' ? 'cur'
+          : c.status === 'failed' || c.status === 'critic_invalid' ? 'err'
           : c.status === 'blocked' ? 'warn'
           : c.status === 'plan_complete' ? 'okb' : 'ok';
       tip = 'cycle ' + i + ' \u00b7 ' + (c.status || '?') + (c.summary ? ' \u00b7 ' + c.summary : '');
@@ -1259,7 +1260,10 @@ function renderQueue(list){
 /* ----- recent ----- */
 function statusPill(st){
   if (st === 'done') return ['st-ok', 'done'];
+  if (st === 'passed') return ['st-ok', 'passed'];
   if (st === 'plan_complete') return ['st-ok', 'plan done'];
+  if (st === 'maxed') return ['st-warn', 'maxed'];
+  if (st === 'critic_invalid') return ['st-err', 'critic invalid'];
   if (st === 'failed') return ['st-err', 'failed'];
   if (st === 'cancelled') return ['st-mut', 'cancelled'];
   if (st === 'blocked') return ['st-warn', 'blocked'];
@@ -1649,6 +1653,8 @@ function init(){
   });
   $('#loopForm').addEventListener('submit', async e => {
     e.preventDefault();
+    const submit = e.currentTarget.querySelector('button[type="submit"]');
+    if (!submit || submit.disabled) return;
     if (!FEATURES.loop) return;
     const project = $('#lProject').value.trim();
     if (!project) return;
@@ -1657,12 +1663,14 @@ function init(){
     const engine = $('#lEngine').value;
     if (mc > 0) body.maxCycles = mc;
     if (engine) body.engine = engine;
+    submit.disabled = true;
     try {
       const j = await post('/api/loop', body);
       flash($('#loopMsg'), 'loop started ' + (j?.id || ''));
       $('#lProject').value = '';
       poll();
     } catch (err) { flash($('#loopMsg'), err.message, true); }
+    finally { submit.disabled = false; }
   });
 
   document.addEventListener('visibilitychange', () => {
