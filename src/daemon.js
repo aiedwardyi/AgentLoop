@@ -113,6 +113,14 @@ function recordActivity(id, line) {
   return text;
 }
 
+function recordEvent(type, data) {
+  try {
+    store.appendEvent(type, data);
+  } catch (error) {
+    console.error(`Failed to append ${type} event: ${error.message}`);
+  }
+}
+
 function streamLines(stream, onLine) {
   let buffered = '';
   stream.setEncoding('utf8');
@@ -397,11 +405,11 @@ function completeTask(task, details) {
     store.writeTask(completedTask, 'running');
     store.moveTask(task.id, 'running', 'done');
     if (status === 'cancelled') {
-      store.appendEvent('cancel', { id: task.id, reason });
+      recordEvent('cancel', { id: task.id, reason });
     } else if (status === 'failed') {
-      store.appendEvent('fail', { id: task.id, reason, ...(workerExitedNonzero ? { code: details.exitCode } : {}) });
+      recordEvent('fail', { id: task.id, reason, ...(workerExitedNonzero ? { code: details.exitCode } : {}) });
     } else {
-      store.appendEvent('done', { id: task.id, status });
+      recordEvent('done', { id: task.id, status });
     }
   } catch (error) {
     console.error(`Failed to finish ${task.id}: ${error.message}`);
@@ -420,27 +428,51 @@ function completeLoop(loop, status, summary, reason) {
     finishedAt,
     ...(reason ? { reason } : {}),
   };
-  const result = {
-    id: loop.id,
-    status,
-    summary,
-    durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
-    finishedAt,
-    ...(reason ? { reason } : {}),
-  };
+  let completed = completedLoop;
 
   try {
-    store.writeResult(result);
-    store.writeTask(completedLoop, 'running');
+    store.writeTask(completed, 'running');
     store.moveTask(loop.id, 'running', 'done');
-    store.appendEvent('loop_ended', { id: loop.id, status, ...(reason ? { reason } : {}) });
   } catch (error) {
     console.error(`Failed to finish ${loop.id}: ${error.message}`);
-  } finally {
-    runningActivity.delete(loop.id);
+    completed = {
+      ...loop,
+      status: 'failed',
+      summary: 'Loop completion failed.',
+      finishedAt,
+      reason: 'loop_completion_failed',
+    };
+
+    try {
+      store.writeTask(completed, 'running');
+      store.moveTask(loop.id, 'running', 'done');
+    } catch (fallbackError) {
+      console.error(`Failed to mark ${loop.id} as failed: ${fallbackError.message}`);
+    }
   }
 
-  return completedLoop;
+  try {
+    store.writeResult({
+      id: loop.id,
+      status: completed.status,
+      summary: completed.summary,
+      durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
+      finishedAt,
+      ...(completed.reason ? { reason: completed.reason } : {}),
+    });
+  } catch (error) {
+    console.error(`Failed to write result for ${loop.id}: ${error.message}`);
+  }
+
+  recordEvent('loop_ended', {
+    id: loop.id,
+    status: completed.status,
+    ...(completed.reason ? { reason: completed.reason } : {}),
+  });
+
+  runningActivity.delete(loop.id);
+
+  return completed;
 }
 
 function appendLoopLog(loop, line) {
@@ -473,6 +505,31 @@ function appendSessionResult(loop, cycle, role, resultText) {
   }
 }
 
+function failLoopTransition(loop, cycleNumber, error) {
+  const current = readRunningLoop(loop.id) || loop;
+  const cycle = currentCycle(current, cycleNumber);
+  const finishedAt = new Date().toISOString();
+  const startedAt = cycle ? taskTime(cycle, 'startedAt') : taskTime(current, 'startedAt');
+  const failed = updateCycle(current, cycleNumber, {
+    status: 'failed',
+    summary: `Cycle ${cycleNumber} transition failed.`,
+    finishedAt,
+    durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
+    reason: 'cycle_transition_failed',
+  });
+
+  completeLoop(failed, 'failed', `Cycle ${cycleNumber} transition failed.`, 'cycle_transition_failed');
+  console.error(`Failed to transition cycle ${cycleNumber} for ${loop.id}: ${error.message}`);
+}
+
+function finishLoopSession(loop, cycle, onFinish, details) {
+  try {
+    onFinish(details);
+  } catch (error) {
+    failLoopTransition(loop, cycle.n, error);
+  }
+}
+
 function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   const model = loop.model || store.config.model || 'gpt-5.6-terra';
   const cwd = loop.projectPath;
@@ -500,7 +557,7 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       windowsHide: true,
     });
   } catch (error) {
-    onFinish({
+    finishLoopSession(loop, cycle, onFinish, {
       exitCode: null,
       forceFailed: true,
       reason: `${role}_start_failed`,
@@ -539,19 +596,15 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       activeWorkers.delete(loop.id);
     }
 
-    try {
-      onFinish({
-        exitCode,
-        signal,
-        forceFailed,
-        reason: timedOut ? `${role}_timed_out` : reason || (inputFailed ? `${role}_input_failed` : undefined),
-        resultText: readWorkerOutput(outputPath, lastTextLine),
-        timedOut,
-        cancelled: worker.cancelled,
-      });
-    } catch (error) {
-      console.error(`Failed to finish ${role} for ${loop.id}: ${error.message}`);
-    }
+    finishLoopSession(loop, cycle, onFinish, {
+      exitCode,
+      signal,
+      forceFailed,
+      reason: timedOut ? `${role}_timed_out` : reason || (inputFailed ? `${role}_input_failed` : undefined),
+      resultText: readWorkerOutput(outputPath, lastTextLine),
+      timedOut,
+      cancelled: worker.cancelled,
+    });
   };
 
   streamLines(child.stdout, captureLine);
@@ -616,7 +669,7 @@ function startLoopCycle(loop) {
 
   try {
     store.writeTask(runningLoop, 'running');
-    store.appendEvent('cycle_started', { id: loop.id, cycle: cycleNumber });
+    recordEvent('cycle_started', { id: loop.id, cycle: cycleNumber });
     runningActivity.set(loop.id, { ts: startedAt, text: runningLoop.lastActivity, toolCalls: 0 });
     spawnLoopSession(
       runningLoop,
@@ -638,87 +691,91 @@ function finishLoopWorker(loop, cycleNumber, details) {
     return;
   }
 
-  const cycle = currentCycle(current, cycleNumber);
-
-  if (!cycle) {
-    completeLoop(current, 'failed', `Cycle ${cycleNumber} is missing.`, 'cycle_missing');
-    return;
-  }
-
-  appendSessionResult(loop, cycle, 'worker', details.resultText);
-  const finishedAt = new Date().toISOString();
-  const durationMs = taskTime(cycle, 'startedAt') ? Math.max(0, Date.now() - taskTime(cycle, 'startedAt')) : 0;
-
-  if (details.cancelled || current.cancelRequested) {
-    const cancelled = updateCycle(current, cycleNumber, {
-      status: 'cancelled',
-      phase: 'worker',
-      finishedAt,
-      durationMs,
-    });
-    completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
-    return;
-  }
-
-  const parsed = parseLoopResult(details.resultText);
-  const reason = workerFailureReason(details, parsed);
-  const workerFields = {
-    workerStatus: reason ? 'failed' : 'done',
-    workerSummary: parsed && parsed.summary ? parsed.summary : fallbackSummary(details.resultText, 'failed', details.timedOut),
-    workerFinishedAt: finishedAt,
-    workerDurationMs: durationMs,
-    workerExitCode: details.exitCode,
-  };
-
-  if (reason) {
-    const failed = updateCycle(current, cycleNumber, {
-      ...workerFields,
-      status: 'failed',
-      phase: 'worker',
-      summary: workerFields.workerSummary,
-      finishedAt,
-      durationMs,
-      reason,
-    });
-    store.writeTask(failed, 'running');
-    store.appendEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'failed', reason });
-    completeLoop(failed, 'failed', `Cycle ${cycleNumber} worker failed.`, reason);
-    return;
-  }
-
-  const awaitingCritic = updateCycle(current, cycleNumber, {
-    ...workerFields,
-    status: 'running',
-    phase: 'critic',
-    summary: workerFields.workerSummary || 'Worker finished.',
-  });
-
   try {
-    store.writeTask(awaitingCritic, 'running');
-    store.appendEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'done' });
-    runningActivity.set(loop.id, {
-      ts: finishedAt,
-      text: `Cycle ${cycleNumber} critic starting.`,
-      toolCalls: 0,
-    });
-    spawnLoopSession(
-      awaitingCritic,
-      currentCycle(awaitingCritic, cycleNumber),
-      'critic',
-      criticPrompt(details.resultText),
-      (criticDetails) => finishLoopCritic(awaitingCritic, cycleNumber, criticDetails),
-    );
-  } catch (error) {
-    const invalid = updateCycle(awaitingCritic, cycleNumber, {
-      status: 'critic_invalid',
+    const cycle = currentCycle(current, cycleNumber);
+
+    if (!cycle) {
+      completeLoop(current, 'failed', `Cycle ${cycleNumber} is missing.`, 'cycle_missing');
+      return;
+    }
+
+    appendSessionResult(loop, cycle, 'worker', details.resultText);
+    const finishedAt = new Date().toISOString();
+    const durationMs = taskTime(cycle, 'startedAt') ? Math.max(0, Date.now() - taskTime(cycle, 'startedAt')) : 0;
+
+    if (details.cancelled || current.cancelRequested) {
+      const cancelled = updateCycle(current, cycleNumber, {
+        status: 'cancelled',
+        phase: 'worker',
+        finishedAt,
+        durationMs,
+      });
+      completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
+      return;
+    }
+
+    const parsed = parseLoopResult(details.resultText);
+    const reason = workerFailureReason(details, parsed);
+    const workerFields = {
+      workerStatus: reason ? 'failed' : 'done',
+      workerSummary: parsed && parsed.summary ? parsed.summary : fallbackSummary(details.resultText, 'failed', details.timedOut),
+      workerFinishedAt: finishedAt,
+      workerDurationMs: durationMs,
+      workerExitCode: details.exitCode,
+    };
+
+    if (reason) {
+      const failed = updateCycle(current, cycleNumber, {
+        ...workerFields,
+        status: 'failed',
+        phase: 'worker',
+        summary: workerFields.workerSummary,
+        finishedAt,
+        durationMs,
+        reason,
+      });
+      store.writeTask(failed, 'running');
+      recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'failed', reason });
+      completeLoop(failed, 'failed', `Cycle ${cycleNumber} worker failed.`, reason);
+      return;
+    }
+
+    const awaitingCritic = updateCycle(current, cycleNumber, {
+      ...workerFields,
+      status: 'running',
       phase: 'critic',
-      summary: 'Critic failed to start.',
-      finishedAt,
-      durationMs,
-      reason: 'critic_start_failed',
+      summary: workerFields.workerSummary || 'Worker finished.',
     });
-    completeLoop(invalid, 'failed', `Cycle ${cycleNumber} critic was invalid.`, 'critic_start_failed');
-    console.error(`Failed to start critic for ${loop.id}: ${error.message}`);
+
+    try {
+      store.writeTask(awaitingCritic, 'running');
+      recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'done' });
+      runningActivity.set(loop.id, {
+        ts: finishedAt,
+        text: `Cycle ${cycleNumber} critic starting.`,
+        toolCalls: 0,
+      });
+      spawnLoopSession(
+        awaitingCritic,
+        currentCycle(awaitingCritic, cycleNumber),
+        'critic',
+        criticPrompt(details.resultText),
+        (criticDetails) => finishLoopCritic(awaitingCritic, cycleNumber, criticDetails),
+      );
+    } catch (error) {
+      const invalid = updateCycle(awaitingCritic, cycleNumber, {
+        status: 'critic_invalid',
+        phase: 'critic',
+        summary: 'Critic failed to start.',
+        finishedAt,
+        durationMs,
+        reason: 'critic_start_failed',
+      });
+      completeLoop(invalid, 'failed', `Cycle ${cycleNumber} critic was invalid.`, 'critic_start_failed');
+      console.error(`Failed to start critic for ${loop.id}: ${error.message}`);
+    }
+  } catch (error) {
+    failLoopTransition(current, cycleNumber, error);
   }
 }
 
@@ -729,97 +786,101 @@ function finishLoopCritic(loop, cycleNumber, details) {
     return;
   }
 
-  const cycle = currentCycle(current, cycleNumber);
+  try {
+    const cycle = currentCycle(current, cycleNumber);
 
-  if (!cycle) {
-    completeLoop(current, 'failed', `Cycle ${cycleNumber} is missing.`, 'cycle_missing');
-    return;
-  }
-
-  appendSessionResult(loop, cycle, 'critic', details.resultText);
-  const finishedAt = new Date().toISOString();
-  const durationMs = taskTime(cycle, 'startedAt') ? Math.max(0, Date.now() - taskTime(cycle, 'startedAt')) : 0;
-
-  if (details.cancelled || current.cancelRequested) {
-    const cancelled = updateCycle(current, cycleNumber, {
-      status: 'cancelled',
-      phase: 'critic',
-      finishedAt,
-      durationMs,
-    });
-    completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
-    return;
-  }
-
-  const verdict = parseCriticVerdict(details.resultText);
-  const reason = criticFailureReason(details, verdict);
-
-  if (reason) {
-    const invalid = updateCycle(current, cycleNumber, {
-      status: 'critic_invalid',
-      phase: 'critic',
-      summary: 'Critic did not produce a valid verdict.',
-      finishedAt,
-      durationMs,
-      reason,
-    });
-    store.writeTask(invalid, 'running');
-    store.appendEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
-    completeLoop(invalid, 'failed', `Cycle ${cycleNumber} critic was invalid.`, reason);
-    return;
-  }
-
-  if (verdict.verdict === 'PASS') {
-    const passed = updateCycle(current, cycleNumber, {
-      status: 'passed',
-      phase: 'critic',
-      verdict: 'PASS',
-      summary: cycle.workerSummary || 'Critic passed.',
-      finishedAt,
-      durationMs,
-    });
-    store.writeTask(passed, 'running');
-    store.appendEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'PASS' });
-    completeLoop(passed, 'passed', `Passed on cycle ${cycleNumber}.`);
-    return;
-  }
-
-  const failed = updateCycle(current, cycleNumber, {
-    status: 'failed',
-    phase: 'critic',
-    verdict: 'FAIL',
-    fixes: verdict.fixes,
-    summary: `Critic failed: ${verdict.fixes}`,
-    finishedAt,
-    durationMs,
-  });
-  store.writeTask(failed, 'running');
-  store.appendEvent('critic_verdict', {
-    id: loop.id,
-    cycle: cycleNumber,
-    verdict: 'FAIL',
-    fixes: verdict.fixes,
-  });
-
-  if (cycleNumber >= current.maxCycles) {
-    completeLoop(failed, 'maxed', 'Reached the maximum cycle count without a passing verdict.');
-    return;
-  }
-
-  setImmediate(() => {
-    const next = readRunningLoop(loop.id);
-
-    if (!next) {
+    if (!cycle) {
+      completeLoop(current, 'failed', `Cycle ${cycleNumber} is missing.`, 'cycle_missing');
       return;
     }
 
-    if (next.cancelRequested) {
-      completeLoop(next, 'cancelled', 'Cancelled.', 'cancelled');
+    appendSessionResult(loop, cycle, 'critic', details.resultText);
+    const finishedAt = new Date().toISOString();
+    const durationMs = taskTime(cycle, 'startedAt') ? Math.max(0, Date.now() - taskTime(cycle, 'startedAt')) : 0;
+
+    if (details.cancelled || current.cancelRequested) {
+      const cancelled = updateCycle(current, cycleNumber, {
+        status: 'cancelled',
+        phase: 'critic',
+        finishedAt,
+        durationMs,
+      });
+      completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
       return;
     }
 
-    startLoopCycle(next);
-  });
+    const verdict = parseCriticVerdict(details.resultText);
+    const reason = criticFailureReason(details, verdict);
+
+    if (reason) {
+      const invalid = updateCycle(current, cycleNumber, {
+        status: 'critic_invalid',
+        phase: 'critic',
+        summary: 'Critic did not produce a valid verdict.',
+        finishedAt,
+        durationMs,
+        reason,
+      });
+      store.writeTask(invalid, 'running');
+      recordEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
+      completeLoop(invalid, 'failed', `Cycle ${cycleNumber} critic was invalid.`, reason);
+      return;
+    }
+
+    if (verdict.verdict === 'PASS') {
+      const passed = updateCycle(current, cycleNumber, {
+        status: 'passed',
+        phase: 'critic',
+        verdict: 'PASS',
+        summary: cycle.workerSummary || 'Critic passed.',
+        finishedAt,
+        durationMs,
+      });
+      store.writeTask(passed, 'running');
+      recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'PASS' });
+      completeLoop(passed, 'passed', `Passed on cycle ${cycleNumber}.`);
+      return;
+    }
+
+    const failed = updateCycle(current, cycleNumber, {
+      status: 'failed',
+      phase: 'critic',
+      verdict: 'FAIL',
+      fixes: verdict.fixes,
+      summary: `Critic failed: ${verdict.fixes}`,
+      finishedAt,
+      durationMs,
+    });
+    store.writeTask(failed, 'running');
+    recordEvent('critic_verdict', {
+      id: loop.id,
+      cycle: cycleNumber,
+      verdict: 'FAIL',
+      fixes: verdict.fixes,
+    });
+
+    if (cycleNumber >= current.maxCycles) {
+      completeLoop(failed, 'maxed', 'Reached the maximum cycle count without a passing verdict.');
+      return;
+    }
+
+    setImmediate(() => {
+      const next = readRunningLoop(loop.id);
+
+      if (!next) {
+        return;
+      }
+
+      if (next.cancelRequested) {
+        completeLoop(next, 'cancelled', 'Cancelled.', 'cancelled');
+        return;
+      }
+
+      startLoopCycle(next);
+    });
+  } catch (error) {
+    failLoopTransition(current, cycleNumber, error);
+  }
 }
 
 function startLoop(loop) {
@@ -841,7 +902,7 @@ function startLoop(loop) {
 
   try {
     store.writeTask(runningLoop, 'running');
-    store.appendEvent('loop_started', { id: loop.id });
+    recordEvent('loop_started', { id: loop.id });
     runningActivity.set(loop.id, { ts: startedAt, text: 'Loop starting.', toolCalls: 0 });
     startLoopCycle(runningLoop);
   } catch (error) {
@@ -965,7 +1026,7 @@ function startTask(task) {
 
   try {
     store.writeTask(runningTask, 'running');
-    store.appendEvent('start', { id: task.id });
+    recordEvent('start', { id: task.id });
     runningActivity.set(task.id, {
       ts: runningTask.startedAt,
       text: 'Worker starting.',
@@ -1308,7 +1369,7 @@ async function dispatch(req, res) {
     priority: body.priority,
     source: 'api',
   });
-  store.appendEvent('queue', { id: task.id });
+  recordEvent('queue', { id: task.id });
 
   sendJson(res, 201, { id: task.id });
 }
@@ -1450,7 +1511,7 @@ async function createLoop(req, res) {
     title: `loop: ${project}`,
     source: 'api',
   });
-  store.appendEvent('loop_queued', { id: loop.id });
+  recordEvent('loop_queued', { id: loop.id });
   sendJson(res, 201, { id: loop.id });
 }
 
@@ -1666,7 +1727,7 @@ function recoverRunningTasks() {
       store.writeResult(result);
       store.writeTask(recovered, 'running');
       store.moveTask(task.id, 'running', 'done');
-      store.appendEvent(isLoop ? 'loop_ended' : 'fail', {
+      recordEvent(isLoop ? 'loop_ended' : 'fail', {
         id: task.id,
         ...(isLoop ? { status: 'failed' } : {}),
         reason: 'daemon_restarted',
