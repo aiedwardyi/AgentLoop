@@ -443,18 +443,33 @@ function completeLoop(loop, status, summary, reason) {
   return completedLoop;
 }
 
-function appendSessionResult(cycle, role, resultText) {
-  const logId = role === 'worker' ? cycle.workerLogId : cycle.criticLogId;
-  const text = String(resultText || '').trim();
+function appendLoopLog(loop, line) {
+  try {
+    store.appendLogLine(loop.id, line);
+  } catch (error) {
+    console.error(`Failed to write loop log for ${loop.id}: ${error.message}`);
+  }
+}
 
-  if (!logId || !text) {
-    return;
+function appendSessionLog(loop, cycle, role, line) {
+  const logId = role === 'worker' ? cycle.workerLogId : cycle.criticLogId;
+
+  if (logId) {
+    try {
+      store.appendLogLine(logId, line);
+    } catch (error) {
+      console.error(`Failed to write ${role} log for cycle ${cycle.n}: ${error.message}`);
+    }
   }
 
-  try {
-    store.appendLogLine(logId, text);
-  } catch (error) {
-    console.error(`Failed to write ${role} result log for cycle ${cycle.n}: ${error.message}`);
+  appendLoopLog(loop, line);
+}
+
+function appendSessionResult(loop, cycle, role, resultText) {
+  const text = String(resultText || '').trim();
+
+  if (text) {
+    appendSessionLog(loop, cycle, role, text);
   }
 }
 
@@ -465,7 +480,6 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
     store.paths.results,
     `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`,
   );
-  const logId = role === 'worker' ? cycle.workerLogId : cycle.criticLogId;
   const args = [
     'exec',
     '--json',
@@ -476,6 +490,8 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
     '-',
   ];
   let child;
+
+  appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} ===`);
 
   try {
     child = spawnCodex(args, {
@@ -503,11 +519,7 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   const worker = { child, timeout: null, cancelled: false, type: 'loop', role };
   activeWorkers.set(loop.id, worker);
   const captureLine = (line) => {
-    try {
-      store.appendLogLine(logId, line);
-    } catch (error) {
-      console.error(`Failed to write ${role} log for ${loop.id}: ${error.message}`);
-    }
+    appendSessionLog(loop, cycle, role, line);
 
     const text = recordActivity(loop.id, line);
 
@@ -633,7 +645,7 @@ function finishLoopWorker(loop, cycleNumber, details) {
     return;
   }
 
-  appendSessionResult(cycle, 'worker', details.resultText);
+  appendSessionResult(loop, cycle, 'worker', details.resultText);
   const finishedAt = new Date().toISOString();
   const durationMs = taskTime(cycle, 'startedAt') ? Math.max(0, Date.now() - taskTime(cycle, 'startedAt')) : 0;
 
@@ -724,7 +736,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
     return;
   }
 
-  appendSessionResult(cycle, 'critic', details.resultText);
+  appendSessionResult(loop, cycle, 'critic', details.resultText);
   const finishedAt = new Date().toISOString();
   const durationMs = taskTime(cycle, 'startedAt') ? Math.max(0, Date.now() - taskTime(cycle, 'startedAt')) : 0;
 
