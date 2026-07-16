@@ -18,6 +18,7 @@ const maxResultText = 20000;
 const maxLogLines = 1000;
 const maxEventBytes = 16 * 1024;
 const knownEngines = new Set(['codex']);
+const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', 'maxed', 'plan_complete']);
 const defaultLoopCycles = 3;
 const runningActivity = new Map();
 const activeWorkers = new Map();
@@ -1359,6 +1360,12 @@ async function createLoop(req, res) {
   }
 
   const projectPath = loopProjectPath(project);
+  const relative = path.relative(store.paths.root, projectPath);
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    sendJson(res, 400, { error: 'Project folder must be inside the AgentLoop root.' });
+    return;
+  }
 
   if (!isDirectory(projectPath)) {
     sendJson(res, 400, { error: 'Project folder does not exist.' });
@@ -1563,14 +1570,20 @@ function tick() {
   }
 }
 
-function recoverRunningLoops() {
-  for (const loop of store.listTasks('running')) {
-    if (loop.type !== 'loop') {
+function recoverRunningTasks() {
+  for (const task of store.listTasks('running')) {
+    if (terminalTaskStatuses.has(task.status)) {
+      try {
+        store.moveTask(task.id, 'running', 'done');
+      } catch (error) {
+        console.error(`Failed to recover ${task.id}: ${error.message}`);
+      }
       continue;
     }
 
     const finishedAt = new Date().toISOString();
-    const cycles = (Array.isArray(loop.cycles) ? loop.cycles : []).map((cycle) => (
+    const isLoop = task.type === 'loop';
+    const cycles = (Array.isArray(task.cycles) ? task.cycles : []).map((cycle) => (
       cycle && cycle.status === 'running'
         ? {
           ...cycle,
@@ -1581,30 +1594,37 @@ function recoverRunningLoops() {
         }
         : cycle
     ));
+    const summary = isLoop
+      ? 'Daemon restarted before the loop finished.'
+      : 'Daemon restarted before the task finished.';
     const recovered = {
-      ...loop,
-      cycles,
+      ...task,
+      ...(isLoop ? { cycles } : {}),
       status: 'failed',
-      summary: 'Daemon restarted before the loop finished.',
+      summary,
       finishedAt,
       reason: 'daemon_restarted',
     };
     const result = {
-      id: loop.id,
+      id: task.id,
       status: 'failed',
-      summary: recovered.summary,
+      summary,
       reason: 'daemon_restarted',
-      durationMs: taskTime(loop, 'startedAt') ? Math.max(0, Date.now() - taskTime(loop, 'startedAt')) : 0,
+      durationMs: taskTime(task, 'startedAt') ? Math.max(0, Date.now() - taskTime(task, 'startedAt')) : 0,
       finishedAt,
     };
 
     try {
       store.writeResult(result);
       store.writeTask(recovered, 'running');
-      store.moveTask(loop.id, 'running', 'done');
-      store.appendEvent('loop_ended', { id: loop.id, status: 'failed', reason: 'daemon_restarted' });
+      store.moveTask(task.id, 'running', 'done');
+      store.appendEvent(isLoop ? 'loop_ended' : 'fail', {
+        id: task.id,
+        ...(isLoop ? { status: 'failed' } : {}),
+        reason: 'daemon_restarted',
+      });
     } catch (error) {
-      console.error(`Failed to recover ${loop.id}: ${error.message}`);
+      console.error(`Failed to recover ${task.id}: ${error.message}`);
     }
   }
 }
@@ -1643,7 +1663,7 @@ function start() {
     return;
   }
 
-  recoverRunningLoops();
+  recoverRunningTasks();
 
   server = http.createServer((req, res) => {
     handleRequest(req, res).catch((error) => {
