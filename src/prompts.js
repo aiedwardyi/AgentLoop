@@ -127,15 +127,13 @@ function parseCriticVerdict(text) {
     lines.pop();
   }
 
-  const finalLine = lines[lines.length - 1];
+  const finalLine = (lines[lines.length - 1] || '').trim();
 
   if (finalLine === 'VERDICT: PASS') {
     return { verdict: 'PASS' };
   }
 
-  const match = typeof finalLine === 'string'
-    ? /^VERDICT: FAIL - (.+)$/.exec(finalLine)
-    : null;
+  const match = /^VERDICT: FAIL - (.+)$/.exec(finalLine);
 
   return match ? { verdict: 'FAIL', fixes: match[1] } : null;
 }

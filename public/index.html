@@ -1653,6 +1653,8 @@ function init(){
   });
   $('#loopForm').addEventListener('submit', async e => {
     e.preventDefault();
+    const submit = e.currentTarget.querySelector('button[type="submit"]');
+    if (!submit || submit.disabled) return;
     if (!FEATURES.loop) return;
     const project = $('#lProject').value.trim();
     if (!project) return;
@@ -1661,12 +1663,14 @@ function init(){
     const engine = $('#lEngine').value;
     if (mc > 0) body.maxCycles = mc;
     if (engine) body.engine = engine;
+    submit.disabled = true;
     try {
       const j = await post('/api/loop', body);
       flash($('#loopMsg'), 'loop started ' + (j?.id || ''));
       $('#lProject').value = '';
       poll();
     } catch (err) { flash($('#loopMsg'), err.message, true); }
+    finally { submit.disabled = false; }
   });
 
   document.addEventListener('visibilitychange', () => {

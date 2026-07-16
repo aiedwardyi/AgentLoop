@@ -1335,6 +1335,22 @@ function loopProjectPath(project) {
     : path.resolve(store.paths.root, project);
 }
 
+function hasActiveLoop(projectPath) {
+  for (const stage of ['pending', 'running']) {
+    for (const task of store.listTasks(stage)) {
+      if (task.type !== 'loop' || terminalTaskStatuses.has(task.status) || typeof task.projectPath !== 'string') {
+        continue;
+      }
+
+      if (path.resolve(task.projectPath) === projectPath) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function seedLoopFiles(projectPath) {
   const defaults = [
     [
@@ -1386,6 +1402,11 @@ async function createLoop(req, res) {
 
   if (!isFile(path.join(projectPath, 'PLAN.md'))) {
     sendJson(res, 400, { error: 'Project folder must contain PLAN.md.' });
+    return;
+  }
+
+  if (hasActiveLoop(projectPath)) {
+    sendJson(res, 400, { error: 'A loop is already running for this project.' });
     return;
   }
 
