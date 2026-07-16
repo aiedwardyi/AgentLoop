@@ -13,6 +13,7 @@ const paths = {
   running: path.join(root, 'state', 'tasks', 'running'),
   done: path.join(root, 'state', 'tasks', 'done'),
   results: path.join(root, 'state', 'results'),
+  logs: path.join(root, 'state', 'logs'),
   events: path.join(root, 'state', 'events.ndjson'),
   daemon: path.join(root, 'state', 'daemon.json'),
 };
@@ -50,7 +51,7 @@ function loadConfig() {
 const config = loadConfig();
 
 function ensureDirs() {
-  for (const directory of [paths.pending, paths.running, paths.done, paths.results]) {
+  for (const directory of [paths.pending, paths.running, paths.done, paths.results, paths.logs]) {
     fs.mkdirSync(directory, { recursive: true });
   }
 }
@@ -157,16 +158,48 @@ function writeResult(result) {
   writeJsonAtomic(path.join(paths.results, `${result.id}.json`), result);
 }
 
-function appendEvent(type, dataObj = {}) {
-  ensureDirs();
-  const event = {
-    ...(dataObj && typeof dataObj === 'object' ? dataObj : {}),
-    type,
-    ts: new Date().toISOString(),
-  };
+function logPath(id) {
+  return path.join(paths.logs, `${id}.ndjson`);
+}
 
-  fs.appendFileSync(paths.events, `${JSON.stringify(event)}\n`, 'utf8');
-  return event;
+function appendLogLine(id, line) {
+  if (!id) {
+    throw new Error('Task id is required.');
+  }
+
+  ensureDirs();
+  const value = String(line ?? '').replace(/[\r\n]+/g, ' ');
+  fs.appendFileSync(logPath(id), `${value}\n`, 'utf8');
+}
+
+function readLogLines(id, limit = 200) {
+  try {
+    const lines = fs.readFileSync(logPath(id), 'utf8').split(/\r?\n/);
+
+    if (lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+
+    return lines.slice(-Math.max(1, limit));
+  } catch {
+    return [];
+  }
+}
+
+function appendEvent(type, dataObj = {}) {
+  try {
+    ensureDirs();
+    const event = {
+      ...(dataObj && typeof dataObj === 'object' ? dataObj : {}),
+      type,
+      ts: new Date().toISOString(),
+    };
+
+    fs.appendFileSync(paths.events, `${JSON.stringify(event)}\n`, 'utf8');
+    return event;
+  } catch {
+    return null;
+  }
 }
 
 function heartbeatValue(heartbeat) {
@@ -287,6 +320,8 @@ module.exports = {
   writeTask,
   listTasks,
   writeResult,
+  appendLogLine,
+  readLogLines,
   appendEvent,
   acquireHeartbeat,
   writeHeartbeat,
