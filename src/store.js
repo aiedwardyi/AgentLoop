@@ -15,10 +15,14 @@ const paths = {
   results: path.join(root, 'state', 'results'),
   logs: path.join(root, 'state', 'logs'),
   events: path.join(root, 'state', 'events.ndjson'),
+  messages: path.join(root, 'state', 'messages.ndjson'),
   daemon: path.join(root, 'state', 'daemon.json'),
   bridge: path.join(root, 'state', 'bridge.json'),
   mcpToken: path.join(root, 'state', 'mcp-token'),
 };
+
+// 50 messages x 2000 code points x 4 bytes, plus JSON overhead and headroom.
+const maxMessageBytes = 512 * 1024;
 
 const defaults = {
   dashboardPort: 5757,
@@ -225,6 +229,73 @@ function appendEvent(type, dataObj = {}) {
   }
 }
 
+function appendMessage(partial = {}) {
+  const input = partial && typeof partial === 'object' ? partial : {};
+  const message = {
+    id: `m-${crypto.randomBytes(4).toString('hex')}`,
+    ts: new Date().toISOString(),
+    kind: input.kind,
+    text: input.text,
+  };
+
+  ensureDirs();
+  fs.appendFileSync(paths.messages, `${JSON.stringify(message)}\n`, 'utf8');
+  return message;
+}
+
+function readMessages(limit = 50) {
+  const max = Number.isInteger(limit) && limit > 0 ? limit : 50;
+
+  try {
+    const size = fs.statSync(paths.messages).size;
+
+    if (!size) {
+      return [];
+    }
+
+    const length = Math.min(size, maxMessageBytes);
+    const buffer = Buffer.alloc(length);
+    const descriptor = fs.openSync(paths.messages, 'r');
+    let bytesRead;
+
+    try {
+      bytesRead = fs.readSync(descriptor, buffer, 0, length, size - length);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split(/\r?\n/);
+
+    if (size > length) {
+      lines.shift();
+    }
+
+    if (lines[lines.length - 1] === '') {
+      lines.pop();
+    }
+
+    const messages = [];
+
+    for (const line of lines.reverse()) {
+      try {
+        const message = JSON.parse(line);
+
+        if (message && typeof message === 'object' && !Array.isArray(message)) {
+          messages.push(message);
+          if (messages.length === max) {
+            break;
+          }
+        }
+      } catch {
+      }
+    }
+
+    return messages;
+  } catch {
+    return [];
+  }
+}
+
 function heartbeatValue(heartbeat) {
   return {
     ...heartbeat,
@@ -347,6 +418,8 @@ module.exports = {
   appendLogLine,
   readLogLines,
   appendEvent,
+  appendMessage,
+  readMessages,
   acquireHeartbeat,
   writeHeartbeat,
   readHeartbeat,

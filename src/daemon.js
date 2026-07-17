@@ -18,6 +18,7 @@ const maxResultText = 20000;
 const maxLogLines = 1000;
 const maxEventBytes = 16 * 1024;
 const knownEngines = new Set(['codex']);
+const messageKinds = new Set(['info', 'question', 'results']);
 const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', 'maxed', 'plan_complete']);
 const defaultLoopCycles = 3;
 const runningActivity = new Map();
@@ -1418,7 +1419,7 @@ function daemonState() {
       blocked: [],
       recent,
     },
-    messages: [],
+    messages: store.readMessages(50),
     events: recentEvents(),
   };
 }
@@ -1509,6 +1510,38 @@ async function dispatch(req, res) {
   recordEvent('queue', { id: task.id });
 
   sendJson(res, 201, { id: task.id });
+}
+
+async function createMessage(req, res) {
+  let body;
+
+  try {
+    body = await readJsonBody(req);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message });
+    return;
+  }
+
+  const text = body && typeof body.text === 'string' ? body.text.trim() : '';
+
+  if (!text) {
+    sendJson(res, 400, { error: 'text is required.' });
+    return;
+  }
+
+  if (Array.from(text).length > 2000) {
+    sendJson(res, 400, { error: 'text must be 2000 characters or fewer.' });
+    return;
+  }
+
+  const kind = body && typeof body === 'object' && body.kind !== undefined ? body.kind : 'info';
+
+  if (!messageKinds.has(kind)) {
+    sendJson(res, 400, { error: 'kind must be info, question, or results.' });
+    return;
+  }
+
+  sendJson(res, 200, store.appendMessage({ kind, text }));
 }
 
 function isDirectory(filePath) {
@@ -1815,7 +1848,12 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (req.method === 'POST' && ['/api/answer', '/api/message'].includes(requestPath)) {
+  if (req.method === 'POST' && requestPath === '/api/message') {
+    await createMessage(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && requestPath === '/api/answer') {
     sendJson(res, 400, { error: 'not enabled' });
     return;
   }

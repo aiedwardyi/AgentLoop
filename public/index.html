@@ -442,24 +442,25 @@ main{
 }
 .fchip:hover{color:var(--text)}
 .fchip.on{background:var(--accent-dim);border-color:var(--accent-soft);color:var(--accent)}
-#msgList{max-height:380px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;margin-bottom:10px;padding:2px}
+#msgList{max-height:380px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;margin-bottom:0;padding:2px}
 @media (min-width:1100px){
   #msgList{max-height:none;height:0;flex:1 1 auto;min-height:240px}
 }
 .bubble{display:flex;gap:9px;min-width:0;position:relative}
 .bubble .avatar{width:7px;height:7px;border-radius:2px;flex:none;margin-top:9px;background:var(--muted)}
-.bubble.r-planner .avatar{background:var(--accent)}
-.bubble.r-worker .avatar{background:var(--info)}
+.bubble.kind-question .avatar{background:var(--warn)}
+.bubble.kind-results .avatar{background:var(--ok)}
 .bwrap{
   flex:1;min-width:0;background:var(--hover);
   border:1px solid var(--line-soft);border-radius:6px;padding:7px 10px 8px;
 }
 .bubble.fresh .bwrap{border-color:var(--accent-soft);background:var(--accent-dim)}
+.bubble.kind-question .bwrap{border-color:color-mix(in srgb,var(--warn) 42%,var(--line-soft));background:color-mix(in srgb,var(--warn) 10%,var(--hover))}
 .bmeta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:2px;font-size:10.5px}
-.bmeta .role{font:650 10px/1.6 var(--mono);letter-spacing:.08em;text-transform:uppercase}
-.bubble.r-planner .role{color:var(--accent)}
-.bubble.r-worker .role{color:var(--info)}
-.bubble.r-system .role{color:var(--muted)}
+.bmeta .kind{font:650 9.5px/1.6 var(--mono);letter-spacing:.08em;text-transform:uppercase;border-radius:4px;padding:0 6px}
+.bmeta .kind-info{color:var(--muted);background:color-mix(in srgb,var(--muted) 12%,transparent)}
+.bmeta .kind-question{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,transparent)}
+.bmeta .kind-results{color:var(--ok);background:color-mix(in srgb,var(--ok) 14%,transparent)}
 .bmeta .rel{color:var(--muted);font-family:var(--mono);font-variant-numeric:tabular-nums}
 .newchip{
   display:none;font:650 9.5px/1.5 var(--mono);letter-spacing:.08em;text-transform:uppercase;
@@ -467,18 +468,7 @@ main{
   border-radius:4px;padding:0 6px;
 }
 .bubble.fresh .newchip{display:inline-flex}
-.waittag{
-  display:inline-flex;align-items:center;gap:5px;
-  font:650 9.5px/1.7 var(--mono);letter-spacing:.05em;text-transform:uppercase;
-  color:var(--warn);background:color-mix(in srgb,var(--warn) 13%,transparent);
-  border-radius:4px;padding:0 7px;
-}
-.waittag::before{content:"";width:4px;height:4px;border-radius:1px;background:currentColor}
-.bubble.linked{cursor:pointer}
-.bubble.linked:hover .bwrap{border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
 .btext{white-space:pre-wrap;word-break:break-word;font-size:12.5px;line-height:1.55}
-.composer{display:flex;gap:8px}
-.composer input{flex:1}
 /* ================= events ================= */
 #eventList{list-style:none;margin:0;padding:0;max-height:300px;overflow-y:auto}
 #eventList li{
@@ -572,11 +562,11 @@ form .btn{margin-top:14px}
 [data-theme="atelier"] .wordmark em{font-style:italic}
 [data-theme="atelier"] .pill,[data-theme="atelier"] .btn,[data-theme="atelier"] .cancel,
 [data-theme="atelier"] .fchip,[data-theme="atelier"] .chip,[data-theme="atelier"] #pill,
-[data-theme="atelier"] .waittag,[data-theme="atelier"] .newchip,[data-theme="atelier"] .count,
+[data-theme="atelier"] .newchip,[data-theme="atelier"] .count,
 [data-theme="atelier"] .brandtag,[data-theme="atelier"] #themeBtn,[data-theme="atelier"] #dclose,[data-theme="atelier"] #nclose,
 [data-theme="atelier"] .act,[data-theme="atelier"] .seg,[data-theme="atelier"] .qm{border-radius:999px}
 [data-theme="atelier"] .pill i,[data-theme="atelier"] #pill .pdot,[data-theme="atelier"] .avatar,
-[data-theme="atelier"] .act .livedot,[data-theme="atelier"] .waittag::before{border-radius:50%}
+[data-theme="atelier"] .act .livedot{border-radius:50%}
 [data-theme="atelier"] input,[data-theme="atelier"] select,[data-theme="atelier"] textarea{border-radius:10px}
 [data-theme="atelier"] .run,[data-theme="atelier"] .blk,[data-theme="atelier"] .bwrap{border-radius:12px}
 [data-theme="atelier"] .rrow,[data-theme="atelier"] .qrow{border-radius:10px}
@@ -696,10 +686,6 @@ form .btn{margin-top:14px}
       </header>
       <div class="cbody">
         <div id="msgList" role="log" aria-label="Messages"></div>
-        <form class="composer" id="msgForm">
-          <input id="msgText" placeholder="Message your agents" autocomplete="off" aria-label="Message your agents">
-          <button class="btn primary" type="submit">Send</button>
-        </form>
       </div>
     </section>
     <section class="card tile t-rec" data-screen-label="Recent tasks">
@@ -795,7 +781,7 @@ form .btn{margin-top:14px}
 
 <script>
 'use strict';
-const FEATURES = {loop: true, message: false, answer: false};
+const FEATURES = {loop: true, message: true, answer: false};
 /* ================= helpers ================= */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
@@ -933,10 +919,10 @@ const MOCK_STATE = {
     ]
   },
   "messages": [
-    { "id": "m-9001", "ts": "2026-07-14T07:06:12.000Z", "from": "worker:t-cc33f9a0", "text": "BLOCKED: input-loop decision needed - non-blocking vs thread. See the question on the task.", "taskId": "t-cc33f9a0" },
-    { "id": "m-9000", "ts": "2026-07-14T07:04:00.000Z", "from": "desktop", "text": "Focus on gameplay correctness first; polish and speed setting can wait." },
-    { "id": "m-8999", "ts": "2026-07-14T07:05:31.000Z", "from": "worker:t-dd44b1c2", "text": "Done: snake playable, all tests green. Ticked the box and logged to STATE.md." },
-    { "id": "m-8998", "ts": "2026-07-14T06:47:17.000Z", "from": "system", "text": "daemon started on port 5757" }
+    { "id": "m-9001", "ts": "2026-07-14T07:06:12.000Z", "kind": "question", "text": "Should the input loop use a non-blocking read or a thread?" },
+    { "id": "m-9000", "ts": "2026-07-14T07:05:31.000Z", "kind": "results", "text": "Snake is playable and all tests are green." },
+    { "id": "m-8999", "ts": "2026-07-14T07:04:00.000Z", "kind": "info", "text": "Focusing on gameplay correctness before polish." },
+    { "id": "m-8998", "ts": "2026-07-14T06:47:17.000Z", "kind": "info", "text": "Daemon started on port 5757." }
   ],
   "events": [
     { "ts": "2026-07-14T07:12:05.000Z", "kind": "spawn", "text": "task started: flake8 + fix imports in cli.py", "taskId": "t-aa11e5f6" },
@@ -1042,11 +1028,6 @@ function mockPost(url, body){
     }
     return {ok: true};
   }
-  if (url === '/api/message'){
-    mock.messages.unshift({id: rid('m'), ts: now, from: 'desktop', text: body.text});
-    mock.messages = mock.messages.slice(0, 50);
-    return {ok: true};
-  }
   return {ok: true};
 }
 async function post(url, body){
@@ -1070,7 +1051,6 @@ async function post(url, body){
 let lastState = null;
 let pollN = 0;
 let msgFilter = 'all';
-let blockedIds = new Set();
 const sigs = {};
 const runBase = new Map();   // id -> {ms, at} elapsed baseline
 const armed = new Map();     // id -> expiry ts for two-click cancel
@@ -1239,7 +1219,6 @@ function renderStatusline(s){
 /* ----- blocked (rebuilds only on change: holds textareas) ----- */
 function renderBlocked(list){
   const arr = Array.isArray(list) ? list : [];
-  blockedIds = new Set(arr.map(x => x?.id).filter(Boolean));
   $('#blockedCard').hidden = arr.length === 0;
   $('#cBlocked').textContent = arr.length || '';
   const sig = arr.map(x => (x?.id ?? '') + '' + (x?.question ?? '')).join('');
@@ -1277,19 +1256,6 @@ async function handleAnswer(id, btn){
     btn.textContent = 'Retry send';
   }
 }
-function scrollToCard(el){
-  const r = el.getBoundingClientRect();
-  const y = r.top + window.scrollY - Math.max(20, (window.innerHeight - r.height) / 2);
-  window.scrollTo({top: Math.max(0, y), behavior: reduceMotion() ? 'auto' : 'smooth'});
-}
-function jumpToBlocked(id){
-  const el = document.getElementById('blk-' + id);
-  if (!el) return;
-  scrollToCard(el);
-  el.classList.add('ping');
-  setTimeout(() => el.classList.remove('ping'), 1600);
-}
-
 /* ----- running (structural sig + volatile in-place updates) ----- */
 function segbarHtml(t){
   const max = Math.min(120, Math.max(1, num(t?.maxCycles) ?? 1));
@@ -1455,27 +1421,20 @@ function renderRecent(list){
 }
 
 /* ----- messages ----- */
-function roleOf(from){
-  const f = String(from || '');
-  if (f === 'desktop') return 'planner';
-  if (f.indexOf('worker') === 0) return 'worker';
-  return 'system';
-}
-function isQuestion(m){
-  const txt = String(m?.text || '');
-  return (m?.taskId && blockedIds.has(m.taskId)) || /\bBLOCKED\b/.test(txt) || txt.indexOf('?') >= 0;
+function messageKind(m){
+  return ['info', 'question', 'results'].includes(m?.kind) ? m.kind : 'info';
 }
 function matchFilter(m){
   if (msgFilter === 'all') return true;
-  const q = isQuestion(m);
-  if (msgFilter === 'questions') return q;
-  return !q && (roleOf(m?.from) === 'worker' || /complete|done|failed|result/i.test(String(m?.text || '')));
+  const kind = messageKind(m);
+  if (msgFilter === 'questions') return kind === 'question';
+  return kind === 'results';
 }
 function renderMessages(list){
   const arr = Array.isArray(list) ? list : [];
   $('#cMessages').textContent = arr.length || '';
   const relBucket = arr.map(m => fmtRel(m?.ts)).join(',');
-  const sig = arr.map(m => m?.id ?? '').join(',') + '|' + msgFilter + '|' + [...blockedIds].join(',') + '|' + relBucket;
+  const sig = arr.map(m => m?.id ?? '').join(',') + '|' + msgFilter + '|' + relBucket;
   if (!changed('msg', sig)) return;
   for (const m of arr){
     const id = m?.id;
@@ -1483,26 +1442,21 @@ function renderMessages(list){
   }
   const cur = new Set(arr.map(m => m?.id));
   for (const k of [...seenMsg.keys()]) if (!cur.has(k)) seenMsg.delete(k);
-  const show = arr.filter(matchFilter).slice().reverse(); // api is newest first; feed reads down
+  const show = arr.filter(matchFilter);
   const box = $('#msgList');
-  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 48 || !box.childElementCount;
+  const nearTop = box.scrollTop < 48 || !box.childElementCount;
   box.innerHTML = show.length ? show.map(m => {
     const id = m?.id ?? '';
-    const role = roleOf(m?.from);
+    const kind = messageKind(m);
     const fresh = pollN > 1 && seenMsg.get(id) === pollN;
-    const linked = !!(m?.taskId && blockedIds.has(m.taskId));
-    const wid = role === 'worker' ? (String(m?.from || '').split(':')[1] || '') : '';
-    return '<article class="bubble r-' + role + (fresh ? ' fresh' : '') + (linked ? ' linked' : '') + '"' +
-      ' data-mid="' + esc(id) + '"' + (linked ? ' data-task="' + esc(m.taskId) + '" title="Jump to the question"' : '') + '>' +
+    return '<article class="bubble kind-' + kind + (fresh ? ' fresh' : '') + '" data-mid="' + esc(id) + '">' +
       '<span class="avatar"></span><div class="bwrap"><div class="bmeta">' +
-        '<span class="role">' + role + '</span>' +
-        (wid ? '<span class="mid">' + esc(wid) + '</span>' : '') +
-        '<span class="rel">' + fmtRel(m?.ts) + '</span>' +
+        '<span class="kind kind-' + kind + '">' + esc(kind) + '</span>' +
+        '<time class="rel" datetime="' + esc(m?.ts) + '">' + esc(fmtRel(m?.ts)) + '</time>' +
         '<span class="newchip">new</span>' +
-        (linked ? '<span class="waittag">waiting for your answer</span>' : '') +
-      '</div><div class="btext">' + esc(trunc(m?.text, 600)) + '</div></div></article>';
+      '</div><div class="btext">' + esc(m?.text) + '</div></div></article>';
   }).join('') : hush('chat', msgFilter === 'all' ? 'No messages yet.' : 'Nothing matches this filter.');
-  if (nearBottom) box.scrollTop = box.scrollHeight;
+  if (nearTop) box.scrollTop = 0;
 }
 function demoteFresh(){
   document.querySelectorAll('.bubble.fresh').forEach(b => {
@@ -1701,7 +1655,6 @@ function tick(){
 function init(){
   $('#loopDivider').hidden = !FEATURES.loop;
   $('#loopForm').hidden = !FEATURES.loop;
-  $('#msgForm').hidden = !FEATURES.message;
   buildThemeMenu();
   if (THEME_IDS.indexOf(document.documentElement.getAttribute('data-theme')) < 0) setTheme('tokyo-night');
   markTheme();
@@ -1758,10 +1711,6 @@ function init(){
     sigs.msg = null;
     renderMessages(lastState?.messages);
   });
-  $('#msgList').addEventListener('click', e => {
-    const b = e.target.closest('.bubble.linked');
-    if (b) jumpToBlocked(b.getAttribute('data-task'));
-  });
   $('#mcpToggle').addEventListener('click', toggleBridge);
   $('#mcpUrlCopy').addEventListener('click', e => copyText(bridgeConnectorUrl(), e.currentTarget));
   $('#mcpReveal').addEventListener('click', toggleMcpToken);
@@ -1779,15 +1728,6 @@ function init(){
     else closeDrawer();
   });
 
-  $('#msgForm').addEventListener('submit', async e => {
-    e.preventDefault();
-    if (!FEATURES.message) return;
-    const inp = $('#msgText');
-    const text = inp.value.trim();
-    if (!text) return;
-    try { await post('/api/message', {text}); inp.value = ''; poll(); }
-    catch (err) { inp.setAttribute('placeholder', 'Send failed - ' + err.message); }
-  });
   $('#taskForm').addEventListener('submit', async e => {
     e.preventDefault();
     const submit = e.currentTarget.querySelector('button[type="submit"]');
