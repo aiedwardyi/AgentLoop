@@ -21,7 +21,8 @@ const paths = {
   mcpToken: path.join(root, 'state', 'mcp-token'),
 };
 
-const maxMessageBytes = 16 * 1024;
+// 50 messages x 2000 code points x 4 bytes, plus JSON overhead and headroom.
+const maxMessageBytes = 512 * 1024;
 
 const defaults = {
   dashboardPort: 5757,
