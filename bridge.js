@@ -301,6 +301,20 @@ const tools = [
     },
     annotations: { readOnlyHint: false },
   },
+  {
+    name: 'send_message',
+    description: 'Post short progress updates, questions for the human, and final result summaries to the AgentLoop dashboard.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        text: { type: 'string', minLength: 1, maxLength: 2000 },
+        kind: { type: 'string', enum: ['info', 'question', 'results'], default: 'info' },
+      },
+      required: ['text'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false },
+  },
 ];
 
 function daemonError(response) {
@@ -347,6 +361,17 @@ async function callTool(params) {
 
     return response.statusCode >= 200 && response.statusCode < 300
       ? toolResult({ id: response.value?.id })
+      : toolFailure(daemonError(response));
+  }
+
+  if (name === 'send_message') {
+    const response = await daemonRequest('/api/message', {
+      text: args.text,
+      kind: args.kind,
+    });
+
+    return response.statusCode >= 200 && response.statusCode < 300
+      ? toolResult(response.value)
       : toolFailure(daemonError(response));
   }
 
