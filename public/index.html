@@ -1137,8 +1137,11 @@ function renderAll(s){
 function bridgeEndpoint(){
   return bridgeInfo.localEndpoint || 'http://127.0.0.1:5758/mcp';
 }
-function bridgeUrl(){
+function bridgeDisplayUrl(){
   return mcpTokenVisible && bridgeInfo.connectorUrl ? bridgeInfo.connectorUrl : bridgeEndpoint();
+}
+function bridgeConnectorUrl(){
+  return bridgeInfo.connectorUrl || bridgeEndpoint();
 }
 function renderBridge(state){
   const running = typeof state?.running === 'boolean' ? state.running : bridgeInfo.running === true;
@@ -1150,7 +1153,7 @@ function renderBridge(state){
   status.className = 'pill ' + (running ? 'st-ok live' : 'st-mut');
   status.innerHTML = '<i></i>' + (running ? 'running' : 'stopped');
   $('#mcpToggle').textContent = running ? 'Stop' : 'Start';
-  $('#mcpUrl').textContent = bridgeUrl();
+  $('#mcpUrl').textContent = bridgeDisplayUrl();
   const token = mcpTokenVisible ? (bridgeInfo.token || 'Unavailable') : 'Hidden';
   $('#mcpToken').textContent = token;
   $('#mcpReveal').textContent = mcpTokenVisible ? 'Hide' : 'Reveal';
@@ -1760,7 +1763,7 @@ function init(){
     if (b) jumpToBlocked(b.getAttribute('data-task'));
   });
   $('#mcpToggle').addEventListener('click', toggleBridge);
-  $('#mcpUrlCopy').addEventListener('click', e => copyText(bridgeUrl(), e.currentTarget));
+  $('#mcpUrlCopy').addEventListener('click', e => copyText(bridgeConnectorUrl(), e.currentTarget));
   $('#mcpReveal').addEventListener('click', toggleMcpToken);
   $('#mcpTokenCopy').addEventListener('click', e => copyText(bridgeInfo.token, e.currentTarget));
   $('#dclose').addEventListener('click', closeDrawer);

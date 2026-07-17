@@ -370,7 +370,7 @@ async function handleMessage(message) {
         capabilities: { tools: {}, resources: {}, prompts: {} },
         serverInfo: { name: 'agentloop', version: '0.1.0' },
       };
-    } else if (message.method === 'notifications/initialized') {
+    } else if (message.method === 'notifications/initialized' || message.method === 'ping') {
       result = {};
     } else if (message.method === 'tools/list') {
       result = { tools };
