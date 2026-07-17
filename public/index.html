@@ -176,6 +176,28 @@ label{
 .chip b{font-family:var(--mono);font-weight:650;color:var(--text);font-variant-numeric:tabular-nums;font-size:12px}
 .hright{display:flex;align-items:center;gap:10px}
 #clock{font-family:var(--mono);font-size:12.5px;color:var(--text);letter-spacing:.04em;font-variant-numeric:tabular-nums}
+/* connector */
+.connector{position:relative}
+#connectorBtn{
+  display:inline-flex;align-items:center;gap:6px;padding:4px 10px;
+  border:1px solid var(--border);background:var(--hover);color:var(--text);
+}
+#connectorBtn:hover{border-color:var(--accent-soft);background:var(--accent-dim)}
+#connectorBtn i{width:6px;height:6px;border-radius:2px;background:var(--muted);flex:none}
+#connectorBtn.live i{background:var(--ok);animation:breathe 1.8s ease-in-out infinite}
+#connectorMenu{
+  position:absolute;right:0;top:calc(100% + 10px);z-index:60;width:390px;max-width:calc(100vw - 24px);
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);
+}
+#connectorMenu[hidden]{display:none}
+#connectorMenu:not([hidden]){animation:menuIn .16s ease}
+.mcp-pophead{
+  display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--border);
+  background:color-mix(in srgb,var(--text) 2.5%,transparent);
+}
+.mcp-poplabel{font:650 10.5px/1.4 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+.mcp-pophead .spacer{flex:1}
+.mcp-popbody{padding:8px}
 /* alive pill */
 #pill{
   display:inline-flex;align-items:center;gap:7px;padding:4px 10px;border-radius:5px;
@@ -285,6 +307,14 @@ main{
 .chead .spacer{flex:1}
 .cbody{padding:8px}
 .cbody.pad{padding:14px 16px 16px}
+/* ================= connector ================= */
+.mcp-row{display:flex;align-items:center;gap:8px;padding:7px 8px;border-bottom:1px solid var(--line-soft)}
+.mcp-row:last-of-type{border-bottom:none}
+.mcp-label{width:68px;flex:none;font:600 10px/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.mcp-value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:400 11px/1.5 var(--mono);color:var(--text)}
+.mcp-token{color:var(--accent)}
+.mcp-hint{padding:8px;color:var(--muted);font-size:11.5px;line-height:1.5}
+.mcpbadge{margin-left:2px;color:var(--info);background:color-mix(in srgb,var(--info) 13%,transparent)}
 /* empty states */
 .hush{
   display:flex;align-items:center;gap:10px;padding:14px 10px;color:var(--muted);font-size:12.5px;
@@ -564,6 +594,9 @@ form .btn{margin-top:14px}
   #drawer,#newPanel{width:100vw;border-left:none}
   .brow{flex-direction:column}
   .brow .send{width:100%}
+  .mcp-row{align-items:flex-start;flex-wrap:wrap}
+  .mcp-label{padding-top:2px}
+  .mcp-value{white-space:normal;overflow-wrap:anywhere}
   input,select,textarea{font-size:16px}  /* prevents iOS zoom-on-focus */
 }
 @media (max-width:480px){
@@ -594,6 +627,31 @@ form .btn{margin-top:14px}
     <span class="chip"><b id="stCost">-</b> spend today</span>
   </div>
   <div class="hright">
+    <div class="connector">
+      <button class="fchip" id="connectorBtn" aria-haspopup="dialog" aria-expanded="false" aria-controls="connectorMenu"><i></i>Connector</button>
+      <div id="connectorMenu" role="dialog" aria-label="MCP connector" hidden>
+        <div class="mcp-pophead">
+          <span class="mcp-poplabel">MCP connector</span>
+          <span class="spacer"></span>
+          <span class="pill st-mut" id="mcpStatus"><i></i>stopped</span>
+          <button class="fchip" id="mcpToggle">Start</button>
+        </div>
+        <div class="mcp-popbody">
+          <div class="mcp-row">
+            <span class="mcp-label">Connector URL</span>
+            <code class="mcp-value" id="mcpUrl">http://127.0.0.1:5758/mcp</code>
+            <button class="fchip" id="mcpUrlCopy">Copy</button>
+          </div>
+          <div class="mcp-row">
+            <span class="mcp-label">Token</span>
+            <code class="mcp-value mcp-token" id="mcpToken">Hidden</code>
+            <button class="fchip" id="mcpReveal">Reveal</button>
+            <button class="fchip" id="mcpTokenCopy" hidden>Copy</button>
+          </div>
+          <p class="mcp-hint">Add as an MCP connector (e.g. ChatGPT developer mode)</p>
+        </div>
+      </div>
+    </div>
     <div class="themer">
       <button id="themeBtn" aria-haspopup="true" aria-expanded="false" aria-label="Choose theme" title="Theme">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -842,10 +900,17 @@ function menuOpen(open){
   $('#themeBtn').setAttribute('aria-expanded', open ? 'true' : 'false');
   if (open) (tm.querySelector('.titem.on') || tm.querySelector('.titem'))?.focus({preventScroll: true});
 }
+function connectorOpen(open){
+  const menu = $('#connectorMenu');
+  menu.hidden = !open;
+  $('#connectorBtn').setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) loadBridge();
+}
 
 /* ================= mock state (preview fallback) ================= */
 const MOCK_STATE = {
   "daemon": { "pid": 3648, "port": 5757, "startedAt": "2026-07-14T06:47:17.685Z", "ts": "2026-07-14T07:12:40.000Z", "alive": true },
+  "bridge": { "running": false },
   "stats": { "today": { "tasks": 7, "costUsd": 2.1436 }, "totalDone": 42 },
   "tasks": {
     "pending": [
@@ -1012,6 +1077,8 @@ const armed = new Map();     // id -> expiry ts for two-click cancel
 const expanded = new Set();  // recent ids with expanded summary
 const seenMsg = new Map();   // msg id -> pollN when first seen
 let drawerTaskId = null;
+let bridgeInfo = {running: false, port: 5758, localEndpoint: 'http://127.0.0.1:5758/mcp', connectorUrl: 'http://127.0.0.1:5758/mcp', token: null};
+let mcpTokenVisible = false;
 
 function changed(key, sig){
   if (sigs[key] === sig) return false;
@@ -1064,6 +1131,86 @@ function renderAll(s){
   renderMessages(s?.messages);
   renderEvents(s?.events);
   renderStatusline(s);
+  renderBridge(s?.bridge);
+}
+
+function bridgeEndpoint(){
+  return bridgeInfo.localEndpoint || 'http://127.0.0.1:5758/mcp';
+}
+function bridgeUrl(){
+  return mcpTokenVisible && bridgeInfo.connectorUrl ? bridgeInfo.connectorUrl : bridgeEndpoint();
+}
+function renderBridge(state){
+  const running = typeof state?.running === 'boolean' ? state.running : bridgeInfo.running === true;
+  bridgeInfo.running = running;
+  const connector = $('#connectorBtn');
+  connector.classList.toggle('live', running);
+  connector.title = running ? 'Connector running' : 'Connector stopped';
+  const status = $('#mcpStatus');
+  status.className = 'pill ' + (running ? 'st-ok live' : 'st-mut');
+  status.innerHTML = '<i></i>' + (running ? 'running' : 'stopped');
+  $('#mcpToggle').textContent = running ? 'Stop' : 'Start';
+  $('#mcpUrl').textContent = bridgeUrl();
+  const token = mcpTokenVisible ? (bridgeInfo.token || 'Unavailable') : 'Hidden';
+  $('#mcpToken').textContent = token;
+  $('#mcpReveal').textContent = mcpTokenVisible ? 'Hide' : 'Reveal';
+  $('#mcpTokenCopy').hidden = !mcpTokenVisible || !bridgeInfo.token;
+}
+function sleep(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+async function loadBridge(){
+  try {
+    const r = await fetch('/api/bridge', {cache: 'no-store'});
+    if (!r.ok) throw new Error('http ' + r.status);
+    const info = await r.json();
+    if (!info || typeof info !== 'object') throw new Error('bad payload');
+    bridgeInfo = {...bridgeInfo, ...info};
+  } catch (e) {
+  }
+  renderBridge({running: bridgeInfo.running});
+  return bridgeInfo;
+}
+async function copyText(value, button){
+  if (!value) return;
+  try {
+    await navigator.clipboard.writeText(value);
+  } catch (e) {
+    const input = document.createElement('textarea');
+    input.value = value;
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.append(input);
+    input.select();
+    document.execCommand('copy');
+    input.remove();
+  }
+  const label = button.textContent;
+  button.textContent = 'Copied';
+  setTimeout(() => { if (button.isConnected) button.textContent = label; }, 1600);
+}
+async function toggleBridge(){
+  const button = $('#mcpToggle');
+  if (button.disabled) return;
+  const running = bridgeInfo.running || lastState?.bridge?.running === true;
+  button.disabled = true;
+  try {
+    const result = await post('/api/bridge/' + (running ? 'stop' : 'start'));
+    bridgeInfo = {...bridgeInfo, ...result};
+    if (running) mcpTokenVisible = false;
+    if (!running) await sleep(250);
+    await loadBridge();
+    poll();
+  } catch (e) {
+    renderBridge({running: bridgeInfo.running});
+  } finally {
+    button.disabled = false;
+  }
+}
+async function toggleMcpToken(){
+  if (!mcpTokenVisible) await loadBridge();
+  mcpTokenVisible = !mcpTokenVisible;
+  renderBridge({running: bridgeInfo.running});
 }
 
 /* ----- statusline ----- */
@@ -1166,7 +1313,7 @@ function renderRunning(list){
   const arr = Array.isArray(list) ? list : [];
   $('#cRunning').textContent = arr.length || '';
   const sig = arr.map(t => [
-    t?.id, t?.title, t?.type, t?.model, t?.engine, t?.cycle, t?.maxCycles,
+    t?.id, t?.title, t?.type, t?.model, t?.engine, t?.source, t?.cycle, t?.maxCycles,
     (Array.isArray(t?.cycles) ? t.cycles : []).map(c => c?.status).join('.')
   ].join('|')).join('~');
   if (changed('run', sig)) {
@@ -1177,6 +1324,7 @@ function renderRunning(list){
       return '<article class="run" data-id="' + id + '">' +
         '<div class="rhead">' +
           '<span class="pill live ' + (isLoop ? 'st-acc' : 'st-info') + '"><i></i>' + (isLoop ? 'loop' : 'task') + '</span>' +
+          (t?.source === 'mcp' ? '<span class="count mcpbadge">MCP</span>' : '') +
           '<span class="ttl">' + esc(t?.title || 'untitled') + '</span>' +
           '<span class="mid">' + id + '</span>' +
           '<button class="cancel" data-id="' + id + '">Cancel</button>' +
@@ -1274,7 +1422,7 @@ function renderRecent(list){
   $('#cRecent').textContent = arr.length || '';
   const sig = arr.map(t => [
     t?.id, t?.title, t?.status ?? t?.result?.status, t?.summary ?? t?.result?.summary,
-    t?.reason ?? t?.result?.reason, t?.prompt,
+    t?.reason ?? t?.result?.reason, t?.prompt, t?.source,
     fmtRel(t?.finishedAt ?? t?.result?.finishedAt)
   ].join('|')).join('~');
   if (!changed('rec', sig)) return;
@@ -1288,7 +1436,7 @@ function renderRecent(list){
     return '<div class="rrow" data-id="' + id + '" data-title="' + esc(t?.title || 'untitled') + '" title="Open transcript" tabindex="0" role="button">' +
       '<span class="pill ' + pc + '"><i></i>' + esc(pt) + '</span>' +
       '<div class="rmain">' +
-        '<div class="rtitle">' + esc(t?.title || 'untitled') + '<span class="mid">' + id + '</span></div>' +
+        '<div class="rtitle">' + esc(t?.title || 'untitled') + (t?.source === 'mcp' ? '<span class="count mcpbadge">MCP</span>' : '') + '<span class="mid">' + id + '</span></div>' +
         '<div class="rsum' + (expanded.has(t?.id) ? ' exp' : '') + '"><span>' + esc(sum || '(no summary)') + '</span>' +
           '<div class="rdetail">' +
             (reason ? '<div><b>reason</b> ' + esc(reason) + '</div>' : '') +
@@ -1554,6 +1702,7 @@ function init(){
   buildThemeMenu();
   if (THEME_IDS.indexOf(document.documentElement.getAttribute('data-theme')) < 0) setTheme('tokyo-night');
   markTheme();
+  $('#connectorBtn').addEventListener('click', () => connectorOpen($('#connectorMenu').hidden));
   $('#themeBtn').addEventListener('click', () => menuOpen($('#themeMenu').hidden));
   $('#themeMenu').addEventListener('click', e => {
     const it = e.target.closest('.titem');
@@ -1564,6 +1713,7 @@ function init(){
   });
   document.addEventListener('click', e => {
     if (!e.target.closest('.themer')) menuOpen(false);
+    if (!e.target.closest('.connector')) connectorOpen(false);
   });
 
   $('#runningList').addEventListener('click', e => {
@@ -1609,6 +1759,10 @@ function init(){
     const b = e.target.closest('.bubble.linked');
     if (b) jumpToBlocked(b.getAttribute('data-task'));
   });
+  $('#mcpToggle').addEventListener('click', toggleBridge);
+  $('#mcpUrlCopy').addEventListener('click', e => copyText(bridgeUrl(), e.currentTarget));
+  $('#mcpReveal').addEventListener('click', toggleMcpToken);
+  $('#mcpTokenCopy').addEventListener('click', e => copyText(bridgeInfo.token, e.currentTarget));
   $('#dclose').addEventListener('click', closeDrawer);
   $('#newBtn').addEventListener('click', openNew);
   $('#queueNew').addEventListener('click', openNew);
@@ -1617,6 +1771,7 @@ function init(){
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     if (!$('#themeMenu').hidden) { menuOpen(false); $('#themeBtn').focus({preventScroll: true}); }
+    else if (!$('#connectorMenu').hidden) { connectorOpen(false); $('#connectorBtn').focus({preventScroll: true}); }
     else if ($('#newPanel').classList.contains('open')) closeNew();
     else closeDrawer();
   });
@@ -1677,6 +1832,8 @@ function init(){
     if (document.visibilityState === 'visible') poll();
   });
   tick();
+  renderBridge();
+  loadBridge();
   poll();
   setInterval(poll, 2000);
   setInterval(tick, 1000);

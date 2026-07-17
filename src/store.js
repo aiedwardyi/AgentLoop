@@ -16,6 +16,8 @@ const paths = {
   logs: path.join(root, 'state', 'logs'),
   events: path.join(root, 'state', 'events.ndjson'),
   daemon: path.join(root, 'state', 'daemon.json'),
+  bridge: path.join(root, 'state', 'bridge.json'),
+  mcpToken: path.join(root, 'state', 'mcp-token'),
 };
 
 const defaults = {
@@ -23,6 +25,7 @@ const defaults = {
   maxConcurrent: 2,
   taskTimeoutMin: 45,
   defaultEngine: 'codex',
+  mcpBridge: { port: 5758 },
 };
 
 function loadConfig() {
@@ -39,6 +42,9 @@ function loadConfig() {
     maxConcurrent: loaded.maxConcurrent ?? defaults.maxConcurrent,
     taskTimeoutMin: loaded.taskTimeoutMin ?? defaults.taskTimeoutMin,
     defaultEngine: loaded.defaultEngine ?? defaults.defaultEngine,
+    mcpBridge: {
+      port: loaded.mcpBridge?.port ?? defaults.mcpBridge.port,
+    },
   };
 
   if (loaded.model) {

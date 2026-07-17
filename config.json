@@ -2,5 +2,8 @@
   "dashboardPort": 5757,
   "maxConcurrent": 2,
   "taskTimeoutMin": 45,
-  "defaultEngine": "codex"
+  "defaultEngine": "codex",
+  "mcpBridge": {
+    "port": 5758
+  }
 }
