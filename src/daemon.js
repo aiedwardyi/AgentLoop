@@ -27,6 +27,7 @@ let daemonInfo;
 let server;
 let ticker;
 let stopping = false;
+let bridgeChild;
 
 function taskTime(task, field) {
   const value = Date.parse(task[field]);
@@ -228,6 +229,131 @@ function stopWorker(child) {
     child.kill('SIGTERM');
   } catch {
   }
+}
+
+function bridgePort() {
+  const port = Number(store.config.mcpBridge?.port);
+  return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : 5758;
+}
+
+function readBridgeHeartbeat() {
+  try {
+    return JSON.parse(fs.readFileSync(store.paths.bridge, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function clearBridgeHeartbeat(pid) {
+  const heartbeat = readBridgeHeartbeat();
+
+  if (pid && heartbeat && heartbeat.pid !== pid) {
+    return;
+  }
+
+  try {
+    fs.unlinkSync(store.paths.bridge);
+  } catch {
+  }
+}
+
+function bridgeRunning() {
+  return store.isAlive(readBridgeHeartbeat());
+}
+
+function recoverBridgeHeartbeat() {
+  const heartbeat = readBridgeHeartbeat();
+
+  if (heartbeat && !store.isAlive(heartbeat)) {
+    clearBridgeHeartbeat(heartbeat.pid);
+  }
+}
+
+function readBridgeToken() {
+  try {
+    const token = fs.readFileSync(store.paths.mcpToken, 'utf8').trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+function bridgeDetails() {
+  const port = bridgePort();
+  const token = readBridgeToken();
+  const localEndpoint = `http://127.0.0.1:${port}/mcp`;
+
+  return {
+    running: bridgeRunning(),
+    port,
+    localEndpoint,
+    connectorUrl: token ? `${localEndpoint}?key=${encodeURIComponent(token)}` : localEndpoint,
+    token,
+  };
+}
+
+function startBridge() {
+  if (bridgeRunning()) {
+    return true;
+  }
+
+  recoverBridgeHeartbeat();
+
+  if (bridgeChild && bridgeChild.exitCode === null && !bridgeChild.killed) {
+    return true;
+  }
+
+  try {
+    const child = spawn(process.execPath, [path.join(store.paths.root, 'bridge.js')], {
+      cwd: store.paths.root,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+
+    bridgeChild = child;
+    child.unref();
+    child.once('error', (error) => {
+      console.error(`Bridge failed to start: ${error.message}`);
+      if (bridgeChild === child) {
+        bridgeChild = undefined;
+      }
+    });
+    child.once('exit', () => {
+      clearBridgeHeartbeat(child.pid);
+      if (bridgeChild === child) {
+        bridgeChild = undefined;
+      }
+    });
+    return true;
+  } catch (error) {
+    console.error(`Bridge failed to start: ${error.message}`);
+    return false;
+  }
+}
+
+function stopBridge() {
+  const heartbeat = readBridgeHeartbeat();
+
+  if (!store.isAlive(heartbeat)) {
+    recoverBridgeHeartbeat();
+    return false;
+  }
+
+  const child = bridgeChild && bridgeChild.pid === heartbeat.pid
+    ? bridgeChild
+    : {
+      pid: heartbeat.pid,
+      kill(signal) {
+        process.kill(this.pid, signal);
+      },
+    };
+
+  terminateWorker(child);
+  clearBridgeHeartbeat(heartbeat.pid);
+  if (bridgeChild === child) {
+    bridgeChild = undefined;
+  }
+  return true;
 }
 
 function readWorkerOutput(outputPath, fallback) {
@@ -1275,6 +1401,9 @@ function daemonState() {
       startedAt: daemonInfo.startedAt,
       ts: new Date().toISOString(),
     },
+    bridge: {
+      running: bridgeRunning(),
+    },
     stats: {
       pending: pendingTasks.length,
       running: runningTasks.length,
@@ -1342,6 +1471,10 @@ function serveDashboard(res) {
   }
 }
 
+function taskSource(body) {
+  return body && body.source === 'mcp' ? 'mcp' : 'api';
+}
+
 async function dispatch(req, res) {
   let body;
 
@@ -1371,7 +1504,7 @@ async function dispatch(req, res) {
     cwd: body.cwd,
     title: body.title,
     priority: body.priority,
-    source: 'api',
+    source: taskSource(body),
   });
   recordEvent('queue', { id: task.id });
 
@@ -1513,7 +1646,7 @@ async function createLoop(req, res) {
     engine,
     model: store.config.model,
     title: `loop: ${project}`,
-    source: 'api',
+    source: taskSource(body),
   });
   recordEvent('loop_queued', { id: loop.id });
   sendJson(res, 201, { id: loop.id });
@@ -1646,6 +1779,11 @@ async function handleRequest(req, res) {
     return;
   }
 
+  if (req.method === 'GET' && requestPath === '/api/bridge') {
+    sendJson(res, 200, bridgeDetails());
+    return;
+  }
+
   if (req.method === 'GET' && requestPath.startsWith('/api/log/')) {
     serveLog(res, requestPath, requestUrl);
     return;
@@ -1658,6 +1796,17 @@ async function handleRequest(req, res) {
 
   if (req.method === 'POST' && requestPath === '/api/loop') {
     await createLoop(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && requestPath === '/api/bridge/start') {
+    sendJson(res, 200, { running: startBridge() || bridgeRunning() });
+    return;
+  }
+
+  if (req.method === 'POST' && requestPath === '/api/bridge/stop') {
+    stopBridge();
+    sendJson(res, 200, { running: bridgeRunning() });
     return;
   }
 
@@ -1744,6 +1893,7 @@ function recoverRunningTasks() {
 
 function stop() {
   stopping = true;
+  stopBridge();
   const workers = [...activeWorkers.values()];
 
   for (const worker of workers) {
@@ -1776,6 +1926,7 @@ function start() {
     return;
   }
 
+  recoverBridgeHeartbeat();
   recoverRunningTasks();
 
   server = http.createServer((req, res) => {
