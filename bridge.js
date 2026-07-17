@@ -29,12 +29,7 @@ function loadConfig() {
 
 function bridgePort() {
   const port = Number(loadConfig().mcpBridge?.port);
-
-  if (port !== 5758) {
-    return 5758;
-  }
-
-  return port;
+  return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : 5758;
 }
 
 function dashboardPort() {
@@ -50,27 +45,41 @@ function log(message) {
   }
 }
 
-function readToken() {
+function storedToken() {
   try {
-    const token = fs.readFileSync(tokenPath, 'utf8').trim();
-
-    if (token) {
-      return token;
-    }
+    return fs.readFileSync(tokenPath, 'utf8').trim();
   } catch {
+    return '';
   }
+}
 
-  const token = crypto.randomBytes(32).toString('hex');
-  fs.mkdirSync(statePath, { recursive: true });
+function readToken() {
+  while (true) {
+    const existing = storedToken();
 
-  try {
-    fs.writeFileSync(tokenPath, `${token}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    return token;
-  } catch (error) {
-    if (error.code === 'EEXIST') {
-      return fs.readFileSync(tokenPath, 'utf8').trim();
+    if (existing) {
+      return existing;
     }
-    throw error;
+
+    try {
+      fs.unlinkSync(tokenPath);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    fs.mkdirSync(statePath, { recursive: true });
+
+    try {
+      fs.writeFileSync(tokenPath, `${token}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      return token;
+    } catch (error) {
+      if (error.code !== 'EEXIST') {
+        throw error;
+      }
+    }
   }
 }
 
@@ -152,6 +161,10 @@ function rpcError(id, code, message) {
 }
 
 function timingSafeEqual(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
 
@@ -162,6 +175,10 @@ function authorized(req, requestUrl) {
   const header = req.headers.authorization;
   const match = typeof header === 'string' ? /^Bearer\s+(.+)$/i.exec(header) : null;
   const candidate = match ? match[1].trim() : requestUrl.searchParams.get('key') || '';
+
+  if (!candidate || !bridgeToken) {
+    return false;
+  }
 
   return timingSafeEqual(candidate, bridgeToken);
 }

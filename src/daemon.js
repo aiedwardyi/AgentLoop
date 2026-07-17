@@ -233,12 +233,7 @@ function stopWorker(child) {
 
 function bridgePort() {
   const port = Number(store.config.mcpBridge?.port);
-
-  if (port !== 5758) {
-    return 5758;
-  }
-
-  return port;
+  return Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : 5758;
 }
 
 function readBridgeHeartbeat() {
