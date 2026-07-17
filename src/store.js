@@ -21,6 +21,8 @@ const paths = {
   mcpToken: path.join(root, 'state', 'mcp-token'),
 };
 
+const maxMessageBytes = 16 * 1024;
+
 const defaults = {
   dashboardPort: 5757,
   maxConcurrent: 2,
@@ -244,7 +246,28 @@ function readMessages(limit = 50) {
   const max = Number.isInteger(limit) && limit > 0 ? limit : 50;
 
   try {
-    const lines = fs.readFileSync(paths.messages, 'utf8').split(/\r?\n/);
+    const size = fs.statSync(paths.messages).size;
+
+    if (!size) {
+      return [];
+    }
+
+    const length = Math.min(size, maxMessageBytes);
+    const buffer = Buffer.alloc(length);
+    const descriptor = fs.openSync(paths.messages, 'r');
+    let bytesRead;
+
+    try {
+      bytesRead = fs.readSync(descriptor, buffer, 0, length, size - length);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+
+    const lines = buffer.subarray(0, bytesRead).toString('utf8').split(/\r?\n/);
+
+    if (size > length) {
+      lines.shift();
+    }
 
     if (lines[lines.length - 1] === '') {
       lines.pop();

@@ -1534,7 +1534,7 @@ async function createMessage(req, res) {
     return;
   }
 
-  const kind = body && body.kind === undefined ? 'info' : body && body.kind;
+  const kind = body && typeof body === 'object' && body.kind !== undefined ? body.kind : 'info';
 
   if (!messageKinds.has(kind)) {
     sendJson(res, 400, { error: 'kind must be info, question, or results.' });
