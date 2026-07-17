@@ -1529,7 +1529,7 @@ async function createMessage(req, res) {
     return;
   }
 
-  if (text.length > 2000) {
+  if (Array.from(text).length > 2000) {
     sendJson(res, 400, { error: 'text must be 2000 characters or fewer.' });
     return;
   }
