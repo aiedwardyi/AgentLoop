@@ -8,9 +8,12 @@ const store = require('./store');
 const {
   taskPrompt,
   loopWorkerPrompt,
+  polishWorkerPrompt,
   criticPrompt,
+  polishCriticPrompt,
   parseLoopResult,
   parseCriticVerdict,
+  parsePolishVerdict,
 } = require('./prompts');
 
 const pollMs = 1500;
@@ -419,6 +422,18 @@ function currentCycle(loop, cycleNumber) {
   return cycles.find((cycle) => cycle && cycle.n === cycleNumber) || null;
 }
 
+function hasPassedCycle(loop) {
+  const cycles = Array.isArray(loop.cycles) ? loop.cycles : [];
+
+  return cycles.some((cycle) => (
+    cycle && (cycle.status === 'passed' || cycle.verdict === 'PASS')
+  ));
+}
+
+function cyclePhase(cycle, phase) {
+  return cycle && cycle.phase === 'polish' ? 'polish' : phase;
+}
+
 function workerFailureReason(details, parsed) {
   if (details.timedOut) {
     return 'timed_out';
@@ -639,6 +654,7 @@ function appendSessionResult(loop, cycle, role, resultText) {
 function failLoopTransition(loop, cycleNumber, error) {
   const current = readRunningLoop(loop.id) || loop;
   const cycle = currentCycle(current, cycleNumber);
+  const passed = hasPassedCycle(current);
   const finishedAt = new Date().toISOString();
   const startedAt = cycle ? taskTime(cycle, 'startedAt') : taskTime(current, 'startedAt');
   const failed = updateCycle(current, cycleNumber, {
@@ -649,7 +665,12 @@ function failLoopTransition(loop, cycleNumber, error) {
     reason: 'cycle_transition_failed',
   });
 
-  completeLoop(failed, 'failed', `Cycle ${cycleNumber} transition failed.`, 'cycle_transition_failed');
+  completeLoop(
+    failed,
+    passed ? 'passed' : 'failed',
+    passed ? `Passed before polish cycle ${cycleNumber} could finish.` : `Cycle ${cycleNumber} transition failed.`,
+    passed ? undefined : 'cycle_transition_failed',
+  );
   console.error(`Failed to transition cycle ${cycleNumber} for ${loop.id}: ${error.message}`);
 }
 
@@ -766,6 +787,23 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   }
 }
 
+function startNextLoopCycle(loop) {
+  setImmediate(() => {
+    const next = readRunningLoop(loop.id);
+
+    if (!next) {
+      return;
+    }
+
+    if (next.cancelRequested) {
+      completeLoop(next, 'cancelled', 'Cancelled.', 'cancelled');
+      return;
+    }
+
+    startLoopCycle(next);
+  });
+}
+
 function startLoopCycle(loop) {
   if (loop.cancelRequested) {
     completeLoop(loop, 'cancelled', 'Cancelled.', 'cancelled');
@@ -774,9 +812,14 @@ function startLoopCycle(loop) {
 
   const cycles = Array.isArray(loop.cycles) ? loop.cycles : [];
   const cycleNumber = cycles.length + 1;
+  const polishing = hasPassedCycle(loop);
 
   if (cycleNumber > loop.maxCycles) {
-    completeLoop(loop, 'maxed', 'Reached the maximum cycle count without a passing verdict.');
+    completeLoop(
+      loop,
+      polishing ? 'passed' : 'maxed',
+      polishing ? `Passed after ${loop.maxCycles} cycles.` : 'Reached the maximum cycle count without a passing verdict.',
+    );
     return;
   }
 
@@ -785,7 +828,7 @@ function startLoopCycle(loop) {
   const cycle = {
     n: cycleNumber,
     status: 'running',
-    phase: 'worker',
+    phase: polishing ? 'polish' : 'worker',
     startedAt,
     workerLogId: cycleLogId(loop.id, cycleNumber, 'worker'),
     criticLogId: cycleLogId(loop.id, cycleNumber, 'critic'),
@@ -806,11 +849,18 @@ function startLoopCycle(loop) {
       runningLoop,
       cycle,
       'worker',
-      loopWorkerPrompt(runningLoop, previous && previous.fixes),
+      polishing
+        ? polishWorkerPrompt(runningLoop, previous && previous.fixes)
+        : loopWorkerPrompt(runningLoop, previous && previous.fixes),
       (details) => finishLoopWorker(runningLoop, cycleNumber, details),
     );
   } catch (error) {
-    completeLoop(runningLoop, 'failed', `Cycle ${cycleNumber} failed to start.`, 'cycle_start_failed');
+    completeLoop(
+      runningLoop,
+      polishing ? 'passed' : 'failed',
+      polishing ? `Passed before polish cycle ${cycleNumber} could start.` : `Cycle ${cycleNumber} failed to start.`,
+      polishing ? undefined : 'cycle_start_failed',
+    );
     console.error(`Failed to start cycle ${cycleNumber} for ${loop.id}: ${error.message}`);
   }
 }
@@ -826,6 +876,11 @@ function finishLoopWorker(loop, cycleNumber, details) {
     const cycle = currentCycle(current, cycleNumber);
 
     if (!cycle) {
+      if (hasPassedCycle(current)) {
+        completeLoop(current, 'passed', `Passed before polish cycle ${cycleNumber} could finish.`);
+        return;
+      }
+
       completeLoop(current, 'failed', `Cycle ${cycleNumber} is missing.`, 'cycle_missing');
       return;
     }
@@ -837,7 +892,7 @@ function finishLoopWorker(loop, cycleNumber, details) {
     if (details.cancelled || current.cancelRequested) {
       const cancelled = updateCycle(current, cycleNumber, {
         status: 'cancelled',
-        phase: 'worker',
+        phase: cyclePhase(cycle, 'worker'),
         finishedAt,
         durationMs,
       });
@@ -856,10 +911,11 @@ function finishLoopWorker(loop, cycleNumber, details) {
     };
 
     if (reason) {
+      const passed = hasPassedCycle(current);
       const failed = updateCycle(current, cycleNumber, {
         ...workerFields,
         status: 'failed',
-        phase: 'worker',
+        phase: cyclePhase(cycle, 'worker'),
         summary: workerFields.workerSummary,
         finishedAt,
         durationMs,
@@ -867,14 +923,19 @@ function finishLoopWorker(loop, cycleNumber, details) {
       });
       store.writeTask(failed, 'running');
       recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'failed', reason });
-      completeLoop(failed, 'failed', `Cycle ${cycleNumber} worker failed.`, reason);
+      completeLoop(
+        failed,
+        passed ? 'passed' : 'failed',
+        passed ? `Passed before polish cycle ${cycleNumber} worker could finish.` : `Cycle ${cycleNumber} worker failed.`,
+        passed ? undefined : reason,
+      );
       return;
     }
 
     const awaitingCritic = updateCycle(current, cycleNumber, {
       ...workerFields,
       status: 'running',
-      phase: 'critic',
+      phase: cyclePhase(cycle, 'critic'),
       summary: workerFields.workerSummary || 'Worker finished.',
     });
 
@@ -890,19 +951,25 @@ function finishLoopWorker(loop, cycleNumber, details) {
         awaitingCritic,
         currentCycle(awaitingCritic, cycleNumber),
         'critic',
-        criticPrompt(details.resultText),
+        cycle.phase === 'polish' ? polishCriticPrompt(details.resultText) : criticPrompt(details.resultText),
         (criticDetails) => finishLoopCritic(awaitingCritic, cycleNumber, criticDetails),
       );
     } catch (error) {
+      const passed = hasPassedCycle(awaitingCritic);
       const invalid = updateCycle(awaitingCritic, cycleNumber, {
         status: 'critic_invalid',
-        phase: 'critic',
+        phase: cyclePhase(cycle, 'critic'),
         summary: 'Critic failed to start.',
         finishedAt,
         durationMs,
         reason: 'critic_start_failed',
       });
-      completeLoop(invalid, 'failed', `Cycle ${cycleNumber} critic was invalid.`, 'critic_start_failed');
+      completeLoop(
+        invalid,
+        passed ? 'passed' : 'failed',
+        passed ? `Passed before polish cycle ${cycleNumber} critic could start.` : `Cycle ${cycleNumber} critic was invalid.`,
+        passed ? undefined : 'critic_start_failed',
+      );
       console.error(`Failed to start critic for ${loop.id}: ${error.message}`);
     }
   } catch (error) {
@@ -921,6 +988,11 @@ function finishLoopCritic(loop, cycleNumber, details) {
     const cycle = currentCycle(current, cycleNumber);
 
     if (!cycle) {
+      if (hasPassedCycle(current)) {
+        completeLoop(current, 'passed', `Passed before polish cycle ${cycleNumber} could finish.`);
+        return;
+      }
+
       completeLoop(current, 'failed', `Cycle ${cycleNumber} is missing.`, 'cycle_missing');
       return;
     }
@@ -932,7 +1004,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
     if (details.cancelled || current.cancelRequested) {
       const cancelled = updateCycle(current, cycleNumber, {
         status: 'cancelled',
-        phase: 'critic',
+        phase: cyclePhase(cycle, 'critic'),
         finishedAt,
         durationMs,
       });
@@ -940,13 +1012,17 @@ function finishLoopCritic(loop, cycleNumber, details) {
       return;
     }
 
-    const verdict = parseCriticVerdict(details.resultText);
+    const polishing = cycle.phase === 'polish';
+    const verdict = polishing
+      ? parsePolishVerdict(details.resultText)
+      : parseCriticVerdict(details.resultText);
     const reason = criticFailureReason(details, verdict);
 
     if (reason) {
+      const passed = hasPassedCycle(current);
       const invalid = updateCycle(current, cycleNumber, {
         status: 'critic_invalid',
-        phase: 'critic',
+        phase: cyclePhase(cycle, 'critic'),
         summary: 'Critic did not produce a valid verdict.',
         finishedAt,
         durationMs,
@@ -954,7 +1030,54 @@ function finishLoopCritic(loop, cycleNumber, details) {
       });
       store.writeTask(invalid, 'running');
       recordEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
-      completeLoop(invalid, 'failed', `Cycle ${cycleNumber} critic was invalid.`, reason);
+      completeLoop(
+        invalid,
+        passed ? 'passed' : 'failed',
+        passed ? `Passed before polish cycle ${cycleNumber} received a valid verdict.` : `Cycle ${cycleNumber} critic was invalid.`,
+        passed ? undefined : reason,
+      );
+      return;
+    }
+
+    if (polishing) {
+      if (verdict.verdict === 'SHIP') {
+        const shipped = updateCycle(current, cycleNumber, {
+          status: 'passed',
+          phase: 'polish',
+          verdict: 'SHIP',
+          summary: cycle.workerSummary || 'Critic shipped.',
+          finishedAt,
+          durationMs,
+        });
+        store.writeTask(shipped, 'running');
+        recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'SHIP' });
+        completeLoop(shipped, 'passed', `Shipped on cycle ${cycleNumber}.`);
+        return;
+      }
+
+      const improved = updateCycle(current, cycleNumber, {
+        status: 'improve',
+        phase: 'polish',
+        verdict: 'IMPROVE',
+        fixes: verdict.improvement,
+        summary: `Polish improvement: ${verdict.improvement}`,
+        finishedAt,
+        durationMs,
+      });
+      store.writeTask(improved, 'running');
+      recordEvent('critic_verdict', {
+        id: loop.id,
+        cycle: cycleNumber,
+        verdict: 'IMPROVE',
+        fixes: verdict.improvement,
+      });
+
+      if (cycleNumber >= current.maxCycles) {
+        completeLoop(improved, 'passed', `Passed after ${cycleNumber} cycles.`);
+        return;
+      }
+
+      startNextLoopCycle(improved);
       return;
     }
 
@@ -969,6 +1092,12 @@ function finishLoopCritic(loop, cycleNumber, details) {
       });
       store.writeTask(passed, 'running');
       recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'PASS' });
+
+      if (current.polish === true && cycleNumber < current.maxCycles) {
+        startNextLoopCycle(passed);
+        return;
+      }
+
       completeLoop(passed, 'passed', `Passed on cycle ${cycleNumber}.`);
       return;
     }
@@ -995,20 +1124,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
       return;
     }
 
-    setImmediate(() => {
-      const next = readRunningLoop(loop.id);
-
-      if (!next) {
-        return;
-      }
-
-      if (next.cancelRequested) {
-        completeLoop(next, 'cancelled', 'Cancelled.', 'cancelled');
-        return;
-      }
-
-      startLoopCycle(next);
-    });
+    startNextLoopCycle(failed);
   } catch (error) {
     failLoopTransition(current, cycleNumber, error);
   }
@@ -1287,9 +1403,10 @@ function dashboardEvent(event) {
   }
 
   if (event.type === 'critic_verdict') {
-    const verdict = event.verdict === 'PASS' ? 'PASS' : 'FAIL';
-    const fixes = verdict === 'FAIL' && typeof event.fixes === 'string' ? `: ${event.fixes}` : '';
-    return { ...value, kind: verdict === 'PASS' ? 'result' : 'error', text: `${loop}${cycle} critic ${verdict}${fixes}` };
+    const verdict = ['PASS', 'FAIL', 'IMPROVE', 'SHIP'].includes(event.verdict) ? event.verdict : 'FAIL';
+    const fixes = ['FAIL', 'IMPROVE'].includes(verdict) && typeof event.fixes === 'string' ? `: ${event.fixes}` : '';
+    const kind = verdict === 'PASS' || verdict === 'SHIP' ? 'result' : verdict === 'IMPROVE' ? 'info' : 'error';
+    return { ...value, kind, text: `${loop}${cycle} critic ${verdict}${fixes}` };
   }
 
   if (event.type === 'critic_invalid') {
@@ -1659,6 +1776,7 @@ async function createLoop(req, res) {
   const engine = body && typeof body.engine === 'string' && body.engine.trim()
     ? body.engine.trim()
     : store.config.defaultEngine;
+  const polish = body && body.polish === true;
 
   if (!knownEngines.has(engine)) {
     sendJson(res, 400, { error: `Unsupported engine: ${engine}.` });
@@ -1676,6 +1794,7 @@ async function createLoop(req, res) {
     project,
     projectPath,
     maxCycles: loopCycles(body && body.maxCycles),
+    ...(polish ? { polish: true } : {}),
     engine,
     model: store.config.model,
     title: `loop: ${project}`,
@@ -1883,6 +2002,7 @@ function recoverRunningTasks() {
 
     const finishedAt = new Date().toISOString();
     const isLoop = task.type === 'loop';
+    const passed = isLoop && hasPassedCycle(task);
     const cycles = (Array.isArray(task.cycles) ? task.cycles : []).map((cycle) => (
       cycle && cycle.status === 'running'
         ? {
@@ -1894,22 +2014,24 @@ function recoverRunningTasks() {
         }
         : cycle
     ));
-    const summary = isLoop
-      ? 'Daemon restarted before the loop finished.'
-      : 'Daemon restarted before the task finished.';
+    const summary = passed
+      ? 'Passed before the daemon restarted.'
+      : isLoop
+        ? 'Daemon restarted before the loop finished.'
+        : 'Daemon restarted before the task finished.';
     const recovered = {
       ...task,
       ...(isLoop ? { cycles } : {}),
-      status: 'failed',
+      status: passed ? 'passed' : 'failed',
       summary,
       finishedAt,
-      reason: 'daemon_restarted',
+      ...(passed ? {} : { reason: 'daemon_restarted' }),
     };
     const result = {
       id: task.id,
-      status: 'failed',
+      status: passed ? 'passed' : 'failed',
       summary,
-      reason: 'daemon_restarted',
+      ...(passed ? {} : { reason: 'daemon_restarted' }),
       durationMs: taskTime(task, 'startedAt') ? Math.max(0, Date.now() - taskTime(task, 'startedAt')) : 0,
       finishedAt,
     };
@@ -1920,8 +2042,8 @@ function recoverRunningTasks() {
       store.moveTask(task.id, 'running', 'done');
       recordEvent(isLoop ? 'loop_ended' : 'fail', {
         id: task.id,
-        ...(isLoop ? { status: 'failed' } : {}),
-        reason: 'daemon_restarted',
+        ...(isLoop ? { status: passed ? 'passed' : 'failed' } : {}),
+        ...(passed ? {} : { reason: 'daemon_restarted' }),
       });
     } catch (error) {
       console.error(`Failed to recover ${task.id}: ${error.message}`);
