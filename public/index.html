@@ -119,6 +119,12 @@ label{
   display:block;margin:12px 0 5px;
   font:600 10px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
 }
+.fcheck{
+  display:flex;align-items:center;gap:8px;margin:12px 0 0;
+}
+.fcheck input{
+  width:14px;height:14px;margin:0;padding:0;accent-color:var(--accent);
+}
 /* buttons */
 .btn{
   display:inline-flex;align-items:center;justify-content:center;gap:6px;
@@ -354,6 +360,8 @@ main{
 .seg.warn{background:var(--warn)}
 .seg.err{background:var(--err)}
 .seg.cur{background:var(--accent);animation:segpulse 1.8s ease-in-out infinite}
+.cycle-tags{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
+.polish-tag{color:var(--accent2);background:color-mix(in srgb,var(--accent2) 13%,transparent)}
 @keyframes segpulse{50%{opacity:.3}}
 /* live activity line */
 .act{
@@ -773,6 +781,10 @@ form .btn{margin-top:14px}
           </select>
         </div>
       </div>
+      <label class="fcheck" for="lPolish">
+        <input id="lPolish" type="checkbox">
+        Polish after pass
+      </label>
       <button class="btn primary" type="submit">Start loop</button>
       <span class="formmsg" id="loopMsg" aria-live="polite"></span>
     </form>
@@ -1260,6 +1272,7 @@ async function handleAnswer(id, btn){
 function segbarHtml(t){
   const max = Math.min(120, Math.max(1, num(t?.maxCycles) ?? 1));
   const hist = Array.isArray(t?.cycles) ? t.cycles : [];
+  const polish = hist.filter(c => c?.phase === 'polish');
   const byN = new Map();
   hist.forEach((c, i) => byN.set(num(c?.n) ?? (i + 1), c));
   const cur = Math.min(max, Math.max(1, num(t?.cycle) || (byN.size + 1)));
@@ -1272,18 +1285,19 @@ function segbarHtml(t){
           : c.status === 'failed' || c.status === 'critic_invalid' ? 'err'
           : c.status === 'blocked' ? 'warn'
           : c.status === 'plan_complete' ? 'okb' : 'ok';
-      tip = 'cycle ' + i + ' \u00b7 ' + (c.status || '?') + (c.summary ? ' \u00b7 ' + c.summary : '');
+      tip = 'cycle ' + i + ' \u00b7 ' + (c.status || '?') + (c.phase === 'polish' ? ' \u00b7 polish' : '') + (c.summary ? ' \u00b7 ' + c.summary : '');
     } else if (i === cur) { cls = 'cur'; tip = 'cycle ' + i + ' \u00b7 running'; }
     out += '<span class="seg ' + cls + '" title="' + esc(trunc(tip, 90)) + '"></span>';
   }
-  return out + '</div>';
+  const tags = polish.map(c => '<span class="count polish-tag">polish ' + esc(num(c?.n) ?? '?') + '</span>').join('');
+  return out + '</div>' + (tags ? '<div class="cycle-tags">' + tags + '</div>' : '');
 }
 function renderRunning(list){
   const arr = Array.isArray(list) ? list : [];
   $('#cRunning').textContent = arr.length || '';
   const sig = arr.map(t => [
     t?.id, t?.title, t?.type, t?.model, t?.engine, t?.source, t?.cycle, t?.maxCycles,
-    (Array.isArray(t?.cycles) ? t.cycles : []).map(c => c?.status).join('.')
+    (Array.isArray(t?.cycles) ? t.cycles : []).map(c => [c?.status, c?.phase].join('.')).join('.')
   ].join('|')).join('~');
   if (changed('run', sig)) {
     $('#runningList').innerHTML = arr.length ? arr.map(t => {
@@ -1760,6 +1774,7 @@ function init(){
     const mc = parseInt($('#lMax').value, 10);
     const engine = $('#lEngine').value;
     if (mc > 0) body.maxCycles = mc;
+    if ($('#lPolish').checked) body.polish = true;
     if (engine) body.engine = engine;
     submit.disabled = true;
     try {

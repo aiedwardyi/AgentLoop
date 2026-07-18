@@ -295,6 +295,7 @@ const tools = [
         project: { type: 'string' },
         maxCycles: { type: 'integer', minimum: 1, maximum: 10 },
         engine: { type: 'string', enum: ['codex'] },
+        polish: { type: 'boolean', default: false, description: 'keep improving after the plan passes' },
       },
       required: ['project'],
       additionalProperties: false,
@@ -356,6 +357,7 @@ async function callTool(params) {
       project: args.project,
       maxCycles: args.maxCycles,
       engine: args.engine,
+      polish: args.polish,
       source: 'mcp',
     });
 
