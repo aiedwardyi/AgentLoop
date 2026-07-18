@@ -434,6 +434,10 @@ function cyclePhase(cycle, phase) {
   return cycle && cycle.phase === 'polish' ? 'polish' : phase;
 }
 
+function incompletePolishSummary() {
+  return 'The final polish cycle did not finish cleanly; the working tree may hold partial changes.';
+}
+
 function workerFailureReason(details, parsed) {
   if (details.timedOut) {
     return 'timed_out';
@@ -902,6 +906,11 @@ function finishLoopWorker(loop, cycleNumber, details) {
 
     const parsed = parseLoopResult(details.resultText);
     const reason = workerFailureReason(details, parsed);
+    const incompletePolishWorker = cycle.phase === 'polish' && (
+      reason === 'timed_out'
+      || reason === 'worker_exited_nonzero'
+      || reason === 'invalid_loop_result'
+    );
     const workerFields = {
       workerStatus: reason ? 'failed' : 'done',
       workerSummary: parsed && parsed.summary ? parsed.summary : fallbackSummary(details.resultText, 'failed', details.timedOut),
@@ -926,7 +935,11 @@ function finishLoopWorker(loop, cycleNumber, details) {
       completeLoop(
         failed,
         passed ? 'passed' : 'failed',
-        passed ? `Passed before polish cycle ${cycleNumber} worker could finish.` : `Cycle ${cycleNumber} worker failed.`,
+        passed && incompletePolishWorker
+          ? incompletePolishSummary()
+          : passed
+            ? `Passed before polish cycle ${cycleNumber} worker could finish.`
+            : `Cycle ${cycleNumber} worker failed.`,
         passed ? undefined : reason,
       );
       return;
@@ -1017,6 +1030,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
       ? parsePolishVerdict(details.resultText)
       : parseCriticVerdict(details.resultText);
     const reason = criticFailureReason(details, verdict);
+    const invalidPolishCritic = polishing && reason === 'critic_invalid_verdict';
 
     if (reason) {
       const passed = hasPassedCycle(current);
@@ -1033,7 +1047,11 @@ function finishLoopCritic(loop, cycleNumber, details) {
       completeLoop(
         invalid,
         passed ? 'passed' : 'failed',
-        passed ? `Passed before polish cycle ${cycleNumber} received a valid verdict.` : `Cycle ${cycleNumber} critic was invalid.`,
+        passed && invalidPolishCritic
+          ? incompletePolishSummary()
+          : passed
+            ? `Passed before polish cycle ${cycleNumber} received a valid verdict.`
+            : `Cycle ${cycleNumber} critic was invalid.`,
         passed ? undefined : reason,
       );
       return;
