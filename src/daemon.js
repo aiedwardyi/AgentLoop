@@ -435,7 +435,7 @@ function cyclePhase(cycle, phase) {
 }
 
 function incompletePolishSummary() {
-  return 'The final polish cycle did not finish cleanly; the working tree may hold partial changes.';
+  return 'The final polish cycle did not finish cleanly; the working tree may hold partial or unreviewed changes.';
 }
 
 function workerFailureReason(details, parsed) {
@@ -1030,7 +1030,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
       ? parsePolishVerdict(details.resultText)
       : parseCriticVerdict(details.resultText);
     const reason = criticFailureReason(details, verdict);
-    const invalidPolishCritic = polishing && reason === 'critic_invalid_verdict';
+    const incompletePolishCritic = polishing && Boolean(reason);
 
     if (reason) {
       const passed = hasPassedCycle(current);
@@ -1047,7 +1047,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
       completeLoop(
         invalid,
         passed ? 'passed' : 'failed',
-        passed && invalidPolishCritic
+        passed && incompletePolishCritic
           ? incompletePolishSummary()
           : passed
             ? `Passed before polish cycle ${cycleNumber} received a valid verdict.`
@@ -2021,6 +2021,9 @@ function recoverRunningTasks() {
     const finishedAt = new Date().toISOString();
     const isLoop = task.type === 'loop';
     const passed = isLoop && hasPassedCycle(task);
+    const interruptedPolishCycle = isLoop && (Array.isArray(task.cycles) ? task.cycles : []).some((cycle) => (
+      cycle && cycle.status === 'running' && cycle.phase === 'polish'
+    ));
     const cycles = (Array.isArray(task.cycles) ? task.cycles : []).map((cycle) => (
       cycle && cycle.status === 'running'
         ? {
@@ -2033,7 +2036,9 @@ function recoverRunningTasks() {
         : cycle
     ));
     const summary = passed
-      ? 'Passed before the daemon restarted.'
+      ? interruptedPolishCycle
+        ? incompletePolishSummary()
+        : 'Passed before the daemon restarted.'
       : isLoop
         ? 'Daemon restarted before the loop finished.'
         : 'Daemon restarted before the task finished.';
