@@ -910,6 +910,7 @@ function finishLoopWorker(loop, cycleNumber, details) {
       reason === 'timed_out'
       || reason === 'worker_exited_nonzero'
       || reason === 'invalid_loop_result'
+      || reason === 'worker_reported_failure'
     );
     const workerFields = {
       workerStatus: reason ? 'failed' : 'done',
@@ -1091,7 +1092,11 @@ function finishLoopCritic(loop, cycleNumber, details) {
       });
 
       if (cycleNumber >= current.maxCycles) {
-        completeLoop(improved, 'passed', `Passed after ${cycleNumber} cycles.`);
+        completeLoop(
+          improved,
+          'passed',
+          'The final improvement was not applied; the working tree may not match the last validated state.',
+        );
         return;
       }
 
