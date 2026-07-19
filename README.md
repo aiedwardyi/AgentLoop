@@ -27,7 +27,7 @@ ChatGPT -> MCP bridge -> daemon -> worker/critic cycles -> dashboard
 - **Dispatch** sends one one-shot task to `POST /api/dispatch`. Its file moves from pending to running to done, with a transcript and dashboard cancellation.
 - **Loop** runs a project cycle by cycle. A worker reads `PLAN.md` and `STATE.md`, makes one increment, updates state, and exits. A fresh critic then reads `PLAN.md`, `GUIDELINES.md`, the worker output, and the project files. The next worker is a new process.
 - **Polish mode** is an optional loop flag: after the first PASS, remaining cycles become polish cycles where the critic re-verifies the guidelines and proposes one improvement per cycle until it verdicts SHIP.
-- **Critic contract** requires the final line to be exactly `VERDICT: PASS` or `VERDICT: FAIL - <concrete fixes>`. PASS ends the loop. FAIL becomes injected fix notes for the next worker. `maxCycles` is capped at 1 to 10 and defaults to 3.
+- **Critic contract** requires the final line to be exactly `VERDICT: PASS` or `VERDICT: FAIL - <concrete fixes>`. PASS ends the loop, unless polish mode is enabled, in which case remaining cycles become polish cycles. FAIL becomes injected fix notes for the next worker. `maxCycles` is capped at 1 to 10 and defaults to 3.
 - **Files are memory.** `PLAN.md`, `STATE.md`, and `GUIDELINES.md` carry the goal, progress, and rubric. A loop project needs `PLAN.md`; missing `STATE.md` and `GUIDELINES.md` files are seeded automatically.
 - **Messages narrate a run.** A connected chat client can post `info`, `question`, or `results` messages through the bridge. They appear in the dashboard Messages panel.
 
@@ -75,6 +75,8 @@ cloudflared tunnel --url http://127.0.0.1:5758
 ```text
 https://<your-tunnel-host>/mcp?key=<token-from-Connector>
 ```
+
+Treat this URL as a secret; restarting the bridge rotates the token.
 
 4. Add that URL as a ChatGPT custom connector, then describe tasks in plain English.
 
@@ -129,7 +131,7 @@ On every platform, install and authenticate Codex CLI first. The daemon and brid
 
 - **Two-way messages.** The dashboard already receives questions from the chat client; answering from the panel closes the loop.
 
-- **OS-level sandboxing.** Workers are path-confined today; a real sandbox hardens long unattended runs.
+- **OS-level sandboxing.** Workers are prompt-confined today; a real sandbox hardens long unattended runs.
 
 - **More engines.** The engine layer is pluggable by design. Codex ships first.
 
