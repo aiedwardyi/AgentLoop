@@ -635,6 +635,11 @@ form .btn{margin-top:14px}
           <button class="fchip" id="mcpToggle">Start</button>
         </div>
         <div class="mcp-popbody">
+          <div class="mcp-row" id="mcpPublicRow" hidden>
+            <span class="mcp-label">Public URL</span>
+            <code class="mcp-value" id="mcpPublicUrl"></code>
+            <button type="button" class="fchip" id="mcpPublicCopy">Copy</button>
+          </div>
           <div class="mcp-row">
             <span class="mcp-label">Connector URL</span>
             <code class="mcp-value" id="mcpUrl">http://127.0.0.1:5758/mcp</code>
@@ -902,7 +907,11 @@ function connectorOpen(open){
   const menu = $('#connectorMenu');
   menu.hidden = !open;
   $('#connectorBtn').setAttribute('aria-expanded', open ? 'true' : 'false');
-  if (open) loadBridge();
+  if (open) {
+    bridgeInfo.publicUrl = null;
+    renderBridge({running: bridgeInfo.running});
+    loadBridge();
+  }
 }
 
 /* ================= mock state (preview fallback) ================= */
@@ -1069,7 +1078,7 @@ const armed = new Map();     // id -> expiry ts for two-click cancel
 const expanded = new Set();  // recent ids with expanded summary
 const seenMsg = new Map();   // msg id -> pollN when first seen
 let drawerTaskId = null;
-let bridgeInfo = {running: false, port: 5758, localEndpoint: 'http://127.0.0.1:5758/mcp', connectorUrl: 'http://127.0.0.1:5758/mcp', token: null};
+let bridgeInfo = {running: false, port: 5758, localEndpoint: 'http://127.0.0.1:5758/mcp', connectorUrl: 'http://127.0.0.1:5758/mcp', publicUrl: null, token: null};
 let mcpTokenVisible = false;
 
 function changed(key, sig){
@@ -1135,6 +1144,15 @@ function bridgeDisplayUrl(){
 function bridgeConnectorUrl(){
   return bridgeInfo.connectorUrl || bridgeEndpoint();
 }
+function bridgePublicUrl(){
+  return bridgeInfo.publicUrl || null;
+}
+function bridgeDisplayPublicUrl(){
+  const full = bridgePublicUrl();
+  if (!full) return null;
+  if (mcpTokenVisible) return full;
+  return full.replace(/([?&]key=)[^&]*/i, '$1...');
+}
 function renderBridge(state){
   const running = typeof state?.running === 'boolean' ? state.running : bridgeInfo.running === true;
   bridgeInfo.running = running;
@@ -1145,6 +1163,10 @@ function renderBridge(state){
   status.className = 'pill ' + (running ? 'st-ok live' : 'st-mut');
   status.innerHTML = '<i></i>' + (running ? 'running' : 'stopped');
   $('#mcpToggle').textContent = running ? 'Stop' : 'Start';
+  const publicUrl = bridgePublicUrl();
+  const publicRow = $('#mcpPublicRow');
+  publicRow.hidden = !publicUrl;
+  $('#mcpPublicUrl').textContent = bridgeDisplayPublicUrl() || '';
   $('#mcpUrl').textContent = bridgeDisplayUrl();
   const token = mcpTokenVisible ? (bridgeInfo.token || 'Unavailable') : 'Hidden';
   $('#mcpToken').textContent = token;
@@ -1726,6 +1748,7 @@ function init(){
     renderMessages(lastState?.messages);
   });
   $('#mcpToggle').addEventListener('click', toggleBridge);
+  $('#mcpPublicCopy').addEventListener('click', e => copyText(bridgePublicUrl(), e.currentTarget));
   $('#mcpUrlCopy').addEventListener('click', e => copyText(bridgeConnectorUrl(), e.currentTarget));
   $('#mcpReveal').addEventListener('click', toggleMcpToken);
   $('#mcpTokenCopy').addEventListener('click', e => copyText(bridgeInfo.token, e.currentTarget));

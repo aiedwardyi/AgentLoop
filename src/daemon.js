@@ -282,16 +282,86 @@ function readBridgeToken() {
   }
 }
 
-function bridgeDetails() {
+const quickTunnelPorts = [20241, 20242, 20243, 20244, 20245];
+const quickTunnelProbeMs = 400;
+
+function probeQuickTunnelPort(port) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let req;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wall);
+      resolve(value);
+    };
+    const wall = setTimeout(() => {
+      try { req.destroy(); } catch { /* already closed */ }
+      done(null);
+    }, quickTunnelProbeMs);
+
+    req = http.get({
+      host: '127.0.0.1',
+      port,
+      path: '/quicktunnel',
+      timeout: quickTunnelProbeMs,
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 4096) {
+          req.destroy();
+          done(null);
+        }
+      });
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          const raw = typeof data?.hostname === 'string' ? data.hostname.trim() : '';
+          if (!raw) {
+            done(null);
+            return;
+          }
+          if (raw.includes('://')) {
+            done(new URL(raw).hostname || null);
+            return;
+          }
+          done(raw.replace(/\/+$/, '') || null);
+        } catch {
+          done(null);
+        }
+      });
+    });
+    req.on('error', () => done(null));
+    req.on('timeout', () => {
+      req.destroy();
+      done(null);
+    });
+  });
+}
+
+async function detectQuickTunnelHostname() {
+  const results = await Promise.all(quickTunnelPorts.map(probeQuickTunnelPort));
+  return results.find((hostname) => hostname) || null;
+}
+
+async function bridgeDetails() {
   const port = bridgePort();
   const token = readBridgeToken();
   const localEndpoint = `http://127.0.0.1:${port}/mcp`;
+  const connectorUrl = token ? `${localEndpoint}?key=${encodeURIComponent(token)}` : localEndpoint;
+  const hostname = await detectQuickTunnelHostname();
+  const publicUrl = hostname
+    ? (token ? `https://${hostname}/mcp?key=${encodeURIComponent(token)}` : `https://${hostname}/mcp`)
+    : null;
 
   return {
     running: bridgeRunning(),
     port,
     localEndpoint,
-    connectorUrl: token ? `${localEndpoint}?key=${encodeURIComponent(token)}` : localEndpoint,
+    connectorUrl,
+    publicUrl,
     token,
   };
 }
@@ -1955,7 +2025,7 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && requestPath === '/api/bridge') {
-    sendJson(res, 200, bridgeDetails());
+    sendJson(res, 200, await bridgeDetails());
     return;
   }
 
