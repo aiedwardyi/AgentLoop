@@ -27,7 +27,7 @@ ChatGPT -> MCP bridge -> daemon -> worker/critic cycles -> dashboard
 - **Dispatch** sends one one-shot task to `POST /api/dispatch`. Its file moves from pending to running to done, with a transcript and dashboard cancellation.
 - **Loop** runs a project cycle by cycle. A worker reads `PLAN.md` and `STATE.md`, makes one increment, updates state, and exits. A fresh critic then reads `PLAN.md`, `GUIDELINES.md`, the worker output, and the project files. The next worker is a new process.
 - **Polish mode** is an optional loop flag: after the first PASS, remaining cycles become polish cycles where the critic re-verifies the guidelines and proposes one improvement per cycle until it verdicts SHIP.
-- **Critic contract** requires the final line to be exactly `VERDICT: PASS` or `VERDICT: FAIL - <concrete fixes>`. PASS ends the loop, unless polish mode is enabled, in which case remaining cycles become polish cycles. FAIL becomes injected fix notes for the next worker. In polish cycles the critic instead ends with `VERDICT: IMPROVE - <one improvement>` or `VERDICT: SHIP`. `maxCycles` is capped at 1 to 10 and defaults to 3.
+- **Critic contract** requires the final line to be exactly `VERDICT: PASS` or `VERDICT: FAIL - <concrete fixes>`. FAIL becomes injected fix notes for the next worker; PASS ends the loop unless polish mode is on. Polish cycles end with `VERDICT: IMPROVE - <one improvement>` or `VERDICT: SHIP`. `maxCycles` is capped at 1 to 10 and defaults to 3.
 - **Files are memory.** `PLAN.md`, `STATE.md`, and `GUIDELINES.md` carry the goal, progress, and rubric. A loop project needs `PLAN.md`; missing `STATE.md` and `GUIDELINES.md` files are seeded automatically.
 - **Messages narrate a run.** A connected chat client can post `info`, `question`, or `results` messages through the bridge. They appear in the dashboard Messages panel.
 
@@ -59,9 +59,7 @@ Open `http://127.0.0.1:5757`. Select **+ New**, enter a title and prompt, then s
 
 ## Connect ChatGPT
 
-This is optional, but it enables planning and steering AgentLoop from a chat.
-
-Once connected, you can plan and launch real work on your machine from a chat, without opening a terminal.
+This is optional: once connected, you can plan and launch real work on your machine from a chat, without opening a terminal.
 
 1. In the dashboard, open **Connector** and select **Start**.
 2. Expose the local bridge on port 5758. For example:
