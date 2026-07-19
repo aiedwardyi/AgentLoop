@@ -287,7 +287,20 @@ const quickTunnelProbeMs = 400;
 
 function probeQuickTunnelPort(port) {
   return new Promise((resolve) => {
-    const req = http.get({
+    let settled = false;
+    let req;
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(wall);
+      resolve(value);
+    };
+    const wall = setTimeout(() => {
+      try { req.destroy(); } catch { /* already closed */ }
+      done(null);
+    }, quickTunnelProbeMs);
+
+    req = http.get({
       host: '127.0.0.1',
       port,
       path: '/quicktunnel',
@@ -299,7 +312,7 @@ function probeQuickTunnelPort(port) {
         body += chunk;
         if (body.length > 4096) {
           req.destroy();
-          resolve(null);
+          done(null);
         }
       });
       res.on('end', () => {
@@ -307,23 +320,23 @@ function probeQuickTunnelPort(port) {
           const data = JSON.parse(body);
           const raw = typeof data?.hostname === 'string' ? data.hostname.trim() : '';
           if (!raw) {
-            resolve(null);
+            done(null);
             return;
           }
           if (raw.includes('://')) {
-            resolve(new URL(raw).hostname || null);
+            done(new URL(raw).hostname || null);
             return;
           }
-          resolve(raw.replace(/\/+$/, '') || null);
+          done(raw.replace(/\/+$/, '') || null);
         } catch {
-          resolve(null);
+          done(null);
         }
       });
     });
-    req.on('error', () => resolve(null));
+    req.on('error', () => done(null));
     req.on('timeout', () => {
       req.destroy();
-      resolve(null);
+      done(null);
     });
   });
 }

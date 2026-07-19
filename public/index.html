@@ -638,7 +638,7 @@ form .btn{margin-top:14px}
           <div class="mcp-row" id="mcpPublicRow" hidden>
             <span class="mcp-label">Public URL</span>
             <code class="mcp-value" id="mcpPublicUrl"></code>
-            <button class="fchip" id="mcpPublicCopy">Copy</button>
+            <button type="button" class="fchip" id="mcpPublicCopy">Copy</button>
           </div>
           <div class="mcp-row">
             <span class="mcp-label">Connector URL</span>
@@ -1147,6 +1147,12 @@ function bridgeConnectorUrl(){
 function bridgePublicUrl(){
   return bridgeInfo.publicUrl || null;
 }
+function bridgeDisplayPublicUrl(){
+  const full = bridgePublicUrl();
+  if (!full) return null;
+  if (mcpTokenVisible) return full;
+  return full.replace(/([?&]key=)[^&]*/i, '$1...');
+}
 function renderBridge(state){
   const running = typeof state?.running === 'boolean' ? state.running : bridgeInfo.running === true;
   bridgeInfo.running = running;
@@ -1160,7 +1166,7 @@ function renderBridge(state){
   const publicUrl = bridgePublicUrl();
   const publicRow = $('#mcpPublicRow');
   publicRow.hidden = !publicUrl;
-  $('#mcpPublicUrl').textContent = publicUrl || '';
+  $('#mcpPublicUrl').textContent = bridgeDisplayPublicUrl() || '';
   $('#mcpUrl').textContent = bridgeDisplayUrl();
   const token = mcpTokenVisible ? (bridgeInfo.token || 'Unavailable') : 'Hidden';
   $('#mcpToken').textContent = token;
