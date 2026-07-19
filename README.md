@@ -76,7 +76,7 @@ cloudflared tunnel --url http://127.0.0.1:5758
 https://<your-tunnel-host>/mcp?key=<token-from-Connector>
 ```
 
-Treat this URL as a secret; restarting the bridge rotates the token.
+Treat this URL as a secret; the token persists in state/mcp-token - delete that file and restart the bridge to rotate it.
 
 4. Add that URL as a ChatGPT custom connector, then describe tasks in plain English.
 
