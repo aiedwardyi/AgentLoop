@@ -282,16 +282,73 @@ function readBridgeToken() {
   }
 }
 
-function bridgeDetails() {
+const quickTunnelPorts = [20241, 20242, 20243, 20244, 20245];
+const quickTunnelProbeMs = 400;
+
+function probeQuickTunnelPort(port) {
+  return new Promise((resolve) => {
+    const req = http.get({
+      host: '127.0.0.1',
+      port,
+      path: '/quicktunnel',
+      timeout: quickTunnelProbeMs,
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+        if (body.length > 4096) {
+          req.destroy();
+          resolve(null);
+        }
+      });
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          const raw = typeof data?.hostname === 'string' ? data.hostname.trim() : '';
+          if (!raw) {
+            resolve(null);
+            return;
+          }
+          if (raw.includes('://')) {
+            resolve(new URL(raw).hostname || null);
+            return;
+          }
+          resolve(raw.replace(/\/+$/, '') || null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+async function detectQuickTunnelHostname() {
+  const results = await Promise.all(quickTunnelPorts.map(probeQuickTunnelPort));
+  return results.find((hostname) => hostname) || null;
+}
+
+async function bridgeDetails() {
   const port = bridgePort();
   const token = readBridgeToken();
   const localEndpoint = `http://127.0.0.1:${port}/mcp`;
+  const connectorUrl = token ? `${localEndpoint}?key=${encodeURIComponent(token)}` : localEndpoint;
+  const hostname = await detectQuickTunnelHostname();
+  const publicUrl = hostname
+    ? (token ? `https://${hostname}/mcp?key=${encodeURIComponent(token)}` : `https://${hostname}/mcp`)
+    : null;
 
   return {
     running: bridgeRunning(),
     port,
     localEndpoint,
-    connectorUrl: token ? `${localEndpoint}?key=${encodeURIComponent(token)}` : localEndpoint,
+    connectorUrl,
+    publicUrl,
     token,
   };
 }
@@ -1955,7 +2012,7 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && requestPath === '/api/bridge') {
-    sendJson(res, 200, bridgeDetails());
+    sendJson(res, 200, await bridgeDetails());
     return;
   }
 
