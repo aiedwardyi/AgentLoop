@@ -4,6 +4,8 @@ Self-improving fresh-context loops for coding work you can watch.
 
 ![AgentLoop dashboard showing a worker and critic loop](docs/dashboard.png)
 
+[Watch the demo](https://youtu.be/4zRdMMzh3C8) | [Try the replay](https://agentloop-replay.vercel.app) - a real recorded run in the live dashboard
+
 ## What it is
 
 Plan a goal in ChatGPT, then let it rip. AgentLoop is a local orchestration daemon for coding agents: each cycle starts a fresh worker, work carries forward in project files, a fresh critic enforces your rubric, and the whole run is watchable on a local dashboard.
