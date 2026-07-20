@@ -197,6 +197,7 @@
     '#queueNew{display:none!important}',
     '.run .cancel{display:none!important}',
     '@media (max-width:720px){#rp-track{display:none}}',
+    '@media (pointer:coarse){#rp-bar{height:44px}#top{top:44px}}',
     '#rp-credit{white-space:nowrap}',
     '#rp-credit a{color:var(--accent);text-decoration:none}',
     '#rp-credit a:hover{text-decoration:underline}',

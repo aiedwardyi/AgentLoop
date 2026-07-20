@@ -593,6 +593,10 @@ form .btn{margin-top:14px}
 [data-theme="atelier"] .run,[data-theme="atelier"] .blk,[data-theme="atelier"] .bwrap{border-radius:12px}
 [data-theme="atelier"] .rrow,[data-theme="atelier"] .qrow{border-radius:10px}
 /* ================= misc ================= */
+@media (max-width:800px){
+  .connector,.themer{position:static}  /* header wraps below ~800px; anchor menus to it, not their buttons */
+  #connectorMenu,#themeMenu{right:12px}
+}
 @media (max-width:640px){
   #top{padding:8px 12px;gap:6px 10px}
   .brandtag{display:none}
@@ -603,7 +607,8 @@ form .btn{margin-top:14px}
   .rrow .pill{width:auto}
   .rside{min-width:64px}
   #statusline{padding:0 14px calc(18px + env(safe-area-inset-bottom))}
-  #drawer,#newPanel{width:100vw;border-left:none}
+  #drawer,#newPanel{left:0;width:auto;border-left:none}
+  #connectorMenu,#themeMenu{left:12px;right:12px;width:auto;max-width:none}
   .brow{flex-direction:column}
   .brow .send{width:100%}
   .mcp-row{align-items:flex-start;flex-wrap:wrap}
@@ -612,11 +617,12 @@ form .btn{margin-top:14px}
   input,select,textarea{font-size:16px}  /* prevents iOS zoom-on-focus */
 }
 @media (max-width:480px){
-  #themeMenu{grid-template-columns:1fr;width:300px}
+  #themeMenu{grid-template-columns:1fr}
 }
 /* touch devices: comfortable hit targets */
 @media (pointer:coarse){
   .btn,.cancel,.fchip,#themeBtn,#dclose,#nclose{min-height:44px}
+  #themeBtn,#dclose,#nclose{min-width:44px}
   .fchip{padding-inline:14px}
   .titem{min-height:44px}
   input,select{min-height:44px}
