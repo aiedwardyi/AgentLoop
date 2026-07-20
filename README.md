@@ -37,7 +37,7 @@ The daemon is plain Node with no package dependencies. Task state, results, tran
 
 ## Built with Codex
 
-The daemon, filesystem store, loop engine, critic, bridge, and dashboard wiring were built in Codex CLI sessions with GPT-5.6. The workflow was plan in ChatGPT, execute in Codex sessions, review rounds with automated reviewers, then forward-fix commits.
+AgentLoop started as my own bottleneck. I was the relay between ChatGPT planning the architecture and Codex executing the tasks, shuttling plans and results back and forth across multiple projects, and quality slipped whenever I stepped away. A bare retry loop was not the answer: loops without standards rot their context and never improve. The fix was to move the human judgment into the system itself, so I designed the sequential fresh-context loop, the files-as-memory model, the strict critic verdict contract, and the rubric-as-GUIDELINES pattern to mimic a demanding human in the loop. Codex CLI with GPT-5.6 turned that design into working code: the daemon, filesystem store, loop engine, critic, bridge, and dashboard wiring, roughly one focused session per slice. The workflow was plan in ChatGPT, execute in Codex sessions, review rounds with automated reviewers with Codex among them, then forward-fix commits.
 
 AgentLoop then runs Codex CLI as both its worker and critic engine. Codex built a tool that drives Codex.
 
