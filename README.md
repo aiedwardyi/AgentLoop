@@ -1,6 +1,6 @@
 # AgentLoop
 
-Sequential fresh-context loops for coding work you can watch and steer.
+Self-improving fresh-context loops for coding work you can watch.
 
 ![AgentLoop dashboard showing a worker and critic loop](docs/dashboard.png)
 
