@@ -10,6 +10,8 @@ Self-improving fresh-context loops for coding work you can watch.
 
 Plan a goal in ChatGPT, then let it rip. AgentLoop is a local orchestration daemon for coding agents: each cycle starts a fresh worker, work carries forward in project files, a fresh critic enforces your rubric, and the whole run is watchable on a local dashboard.
 
+AgentLoop is for solo developers who run long Codex tasks across multiple projects and cannot supervise every session.
+
 It exists because running coding agents by hand means shuttling plans between a chat and a terminal all day, and quality slips the moment you stop watching.
 
 Your standards live in GUIDELINES.md and the critic enforces them every cycle, so you supervise the work without babysitting it.
@@ -32,6 +34,7 @@ ChatGPT -> MCP bridge -> daemon -> worker/critic cycles -> dashboard
 - **Critic contract** requires the final line to be exactly `VERDICT: PASS` or `VERDICT: FAIL - <concrete fixes>`. FAIL becomes injected fix notes for the next worker; PASS ends the loop unless polish mode is on. Polish cycles end with `VERDICT: IMPROVE - <one improvement>` or `VERDICT: SHIP`. `maxCycles` is capped at 1 to 10 and defaults to 3.
 - **Files are memory.** `PLAN.md`, `STATE.md`, and `GUIDELINES.md` carry the goal, progress, and rubric. A loop project needs `PLAN.md`; missing `STATE.md` and `GUIDELINES.md` files are seeded automatically.
 - **Messages narrate a run.** A connected chat client can post `info`, `question`, or `results` messages through the bridge. They appear in the dashboard Messages panel.
+- **Workers are sandboxed.** Every Codex session uses workspace-write sandboxing, disables network access inside the sandbox, and routes boundary requests through automatic approval review.
 
 The daemon is plain Node with no package dependencies. Task state, results, transcripts, events, and messages are stored as JSON or NDJSON files. The dashboard is one local HTML file at `http://127.0.0.1:5757`.
 
@@ -40,6 +43,12 @@ The daemon is plain Node with no package dependencies. Task state, results, tran
 AgentLoop started as my own bottleneck. I was the relay between ChatGPT planning the architecture and Codex executing the tasks, shuttling plans and results back and forth across multiple projects, and quality slipped whenever I stepped away. A bare retry loop was not the answer: loops without standards rot their context and never improve. The fix was to move the human judgment into the system itself, so I designed the sequential fresh-context loop, the files-as-memory model, the strict critic verdict contract, and the rubric-as-GUIDELINES pattern to mimic a demanding human in the loop. Codex CLI with GPT-5.6 turned that design into working code: the daemon, filesystem store, loop engine, critic, bridge, and dashboard wiring, roughly one focused session per slice. The workflow was plan in ChatGPT, execute in Codex sessions, review rounds with automated reviewers with Codex among them, then forward-fix commits.
 
 AgentLoop then runs Codex CLI as both its worker and critic engine. Codex built a tool that drives Codex.
+
+## Independent evaluation
+
+The reproducible [query parser evaluation](examples/query-parser) asked for the full repair in one pass. Cycle 1 produced nine passing tests, but a fresh critic found a mixed percent-decoding defect and returned FAIL. Cycle 2 fixed it, added regression coverage, passed 11 tests, and received PASS from a new critic.
+
+[Read the evaluation record](docs/evaluation.md).
 
 ## Quickstart
 
@@ -130,8 +139,6 @@ On every platform, install and authenticate Codex CLI first. The daemon and brid
 - **Research loops.** Cycles that gather sources first, then write against an explicit rubric - reports, docs, briefs.
 
 - **Two-way messages.** The dashboard already receives questions from the chat client; answering from the panel closes the loop.
-
-- **OS-level sandboxing.** Workers are prompt-confined today; a real sandbox hardens long unattended runs.
 
 - **More engines.** The engine layer is pluggable by design. Codex ships first.
 
