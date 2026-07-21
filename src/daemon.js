@@ -766,7 +766,10 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   const args = [
     'exec',
     '--json',
-    '--dangerously-bypass-approvals-and-sandbox',
+    '--sandbox', 'workspace-write',
+    '--config', 'approval_policy="on-request"',
+    '--config', 'approvals_reviewer="auto_review"',
+    '--config', 'sandbox_workspace_write.network_access=false',
     '--skip-git-repo-check',
     '--output-last-message', outputPath,
     '--model', model,
@@ -1258,7 +1261,10 @@ function spawnWorker(task) {
   const args = [
     'exec',
     '--json',
-    '--dangerously-bypass-approvals-and-sandbox',
+    '--sandbox', 'workspace-write',
+    '--config', 'approval_policy="on-request"',
+    '--config', 'approvals_reviewer="auto_review"',
+    '--config', 'sandbox_workspace_write.network_access=false',
     '--skip-git-repo-check',
     '--output-last-message', outputPath,
     '--model', model,

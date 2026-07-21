@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Sequential fresh-context agent orchestrator",
+  "scripts": {
+    "test": "node --test test/sandbox.test.js"
+  },
   "engines": {
     "node": ">=18"
   }
