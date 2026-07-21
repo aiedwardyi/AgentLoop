@@ -1,6 +1,8 @@
 # Independent evaluation
 
-On July 22, 2026, AgentLoop ran the reproducible [query parser fixture](../examples/query-parser) with three cycles available and polish disabled. The [plan](../examples/query-parser/PLAN.md) requested the complete repair in one pass and prohibited artificial cycle boundaries. The [guidelines](../examples/query-parser/GUIDELINES.md) defined ten acceptance criteria.
+AgentLoop ran the reproducible [query parser fixture](../examples/query-parser) with three cycles available and polish disabled. The [plan](../examples/query-parser/PLAN.md) requested the complete repair in one pass and prohibited artificial cycle boundaries. The [guidelines](../examples/query-parser/GUIDELINES.md) defined ten acceptance criteria.
+
+The committed fixture is the pre-run starting state. A reproduction run repairs that working copy, adds tests, and updates `STATE.md`.
 
 | Cycle | Worker result | Independent critic result |
 | --- | --- | --- |
