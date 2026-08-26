@@ -100,7 +100,7 @@ Requirements:
 
 - Node.js 18 or newer
 - Git
-- At least one engine CLI installed, authenticated, and on `PATH`: Codex CLI (`codex`) or Claude Code (`claude`) 2.1.169 or newer, the release that added `--safe-mode`
+- At least one engine CLI installed and authenticated: Codex CLI (`codex`) or Claude Code (`claude`) 2.1.169 or newer, the release that added `--safe-mode`. Each one is found on `PATH` or through an `enginePaths` override
 
 Windows:
 

@@ -3,9 +3,10 @@
 
 // Server port of the dashboard's stripPaths. The drive and UNC variants also
 // catch spaced segments ("C:\Program Files\...") the shared pattern cannot.
-const posixPathPattern = /(?<![\w:.\/\\])(?:[A-Za-z]:)?(?:[\/\\]|~[\/\\])[\w.@~-]+(?:[\/\\][\w.@ ~-]+)*[\/\\]?/g;
-const drivePathPattern = /[A-Za-z]:[\\\/](?:[^\\\/:*?"<>|\r\n]+[\\\/])*[\w.@~-]+[\\\/]?/g;
-const uncPathPattern = /\\\\[\w.$-]+(?:[\\\/][^\\\/:*?"<>|\r\n]+)*[\\\/][\w.@~-]+[\\\/]?/g;
+// \w is ASCII-only, so segments match a Unicode class instead: a Korean path must redact too.
+const posixPathPattern = /(?<![\p{L}\p{N}_:.\/\\])(?:[A-Za-z]:)?(?:[\/\\]|~[\/\\])[\p{L}\p{N}_.@~-]+(?:[\/\\][\p{L}\p{N}_.@ ~-]+)*[\/\\]?/gu;
+const drivePathPattern = /[A-Za-z]:[\\\/](?:[^\\\/:*?"<>|\r\n]+[\\\/])*[\p{L}\p{N}_.@~-]+[\\\/]?/gu;
+const uncPathPattern = /\\\\[\p{L}\p{N}_.$-]+(?:[\\\/][^\\\/:*?"<>|\r\n]+)*[\\\/][\p{L}\p{N}_.@~-]+[\\\/]?/gu;
 
 function lastSegment(value) {
   const segments = String(value ?? '').split(/[\\\/]/).filter(Boolean);

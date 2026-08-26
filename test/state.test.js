@@ -13,6 +13,13 @@ test('absolute paths collapse to their last segment', () => {
   assert.equal(state.stripAbsPaths('copy \\\\server\\share\\file.txt'), 'copy file.txt');
 });
 
+test('non-ASCII path segments collapse too', () => {
+  assert.equal(state.stripAbsPaths('/用户/项目/文件.js'), '文件.js');
+  assert.equal(state.stripAbsPaths('wrote /사용자/문서/보고서.md now'), 'wrote 보고서.md now');
+  assert.equal(state.stripAbsPaths('Edit: C:\\사용자\\프로젝트\\파일.js'), 'Edit: 파일.js');
+  assert.equal(state.stripAbsPaths('copy \\\\서버\\공유\\파일.txt'), 'copy 파일.txt');
+});
+
 test('single-segment absolute paths collapse too', () => {
   assert.equal(state.stripAbsPaths('wrote /etc'), 'wrote etc');
   assert.equal(state.stripAbsPaths('read C:\\boot.ini now'), 'read boot.ini now');

@@ -76,6 +76,11 @@ function statusSnapshot(state) {
   };
 }
 
+// MCP requires structuredContent to be a JSON object: an array or an empty body is not one.
+function structuredValue(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : { ok: true };
+}
+
 function toolResult(value) {
   return {
     content: [{ type: 'text', text: JSON.stringify(value) }],
@@ -203,11 +208,11 @@ async function callTool(params) {
     });
 
     return response.statusCode >= 200 && response.statusCode < 300
-      ? toolResult(response.value && typeof response.value === 'object' ? response.value : { ok: true })
+      ? toolResult(structuredValue(response.value))
       : toolFailure(daemonError(response));
   }
 
   return toolFailure(`Unknown tool: ${name}.`);
 }
 
-module.exports = { tools, callTool };
+module.exports = { tools, callTool, structuredValue };

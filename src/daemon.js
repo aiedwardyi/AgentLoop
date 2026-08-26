@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 
 const store = require('./store');
 const engines = require('./engines');
@@ -23,9 +24,11 @@ const pollMs = 1500;
 const maxResultText = 20000;
 const maxLogLines = 1000;
 const maxEventBytes = 16 * 1024;
+const maxDigestBytes = 1024 * 1024;
 const knownEngines = new Set(engines.ids());
 const messageKinds = new Set(['info', 'question', 'results']);
 const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', 'maxed', 'partial', 'incomplete', 'plan_complete']);
+const dirtyTreeError = 'Auto-checkpoint needs a clean project tree: commit or stash your changes first.';
 const defaultLoopCycles = 3;
 const defaultTaskRetries = 3;
 const runningActivity = new Map();
@@ -1111,12 +1114,17 @@ function cycleCostUsd(cycle, criticCost) {
   return { costUsd: state.roundCost((worker || 0) + (critic || 0)) };
 }
 
+// done.length counts CONTINUE verdicts only, so it lags the plan once an item is blocked.
+function cycleTaskNumber(cycle, fallback) {
+  return cycle && Number.isInteger(cycle.task) ? cycle.task : fallback;
+}
+
 // The blocked entry names the plan position this cycle was working: done.length alone misses
 // earlier blocks, and nextItem still names the item that came before them.
 function blockedEntry(loop, cycle) {
   const done = Array.isArray(loop.done) ? loop.done.length : 0;
   const blocked = Array.isArray(loop.blocked) ? loop.blocked.length : 0;
-  const task = cycle && Number.isInteger(cycle.task) ? cycle.task : done + blocked + 1;
+  const task = cycleTaskNumber(cycle, done + blocked + 1);
   const title = (Array.isArray(loop.planTasks) ? loop.planTasks : [])[task - 1];
 
   return {
@@ -1312,6 +1320,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
 
     if (verdict.verdict === 'CONTINUE') {
       const done = [...(Array.isArray(current.done) ? current.done : []), verdict.done];
+      const task = cycleTaskNumber(cycle, done.length);
       let continued = updateCycle(
         { ...current, done, nextItem: verdict.next, failStreak: 0 },
         cycleNumber,
@@ -1321,13 +1330,13 @@ function finishLoopCritic(loop, cycleNumber, details) {
           verdict: 'CONTINUE',
           done: verdict.done,
           next: verdict.next,
-          summary: `Task ${done.length} done: ${verdict.done}`,
+          summary: `Task ${task} done: ${verdict.done}`,
           finishedAt,
           durationMs,
           ...cycleCostUsd(cycle, details.costUsd),
         },
       );
-      continued = recordCheckpoint(continued, cycleNumber, `wip(loop): task ${done.length} - ${verdict.done}`);
+      continued = recordCheckpoint(continued, cycleNumber, `wip(loop): task ${task} - ${verdict.done}`);
       store.writeTask(continued, 'running');
       recordEvent('critic_verdict', {
         id: loop.id,
@@ -1388,6 +1397,13 @@ function startLoop(loop) {
     store.moveTask(loop.id, 'pending', 'running');
   } catch (error) {
     console.error(`Failed to start ${loop.id}: ${error.message}`);
+    return;
+  }
+
+  // The enqueue gate approved a tree that can drift while the loop waits for a slot.
+  // A loop queued before the snapshot existed has no baseline to compare, so it is left alone.
+  if (loop.gitAtQueue && !madeNoChanges(loop.gitAtQueue, gitSnapshot(loop.projectPath))) {
+    completeLoop(runningLoop, 'failed', dirtyTreeError, 'dirty_project_tree');
     return;
   }
 
@@ -1974,22 +1990,51 @@ function runGit(projectPath, args) {
   }
 }
 
-// A checkpoint commit and a worker's own commit both move HEAD, so progress is the pair
-// (HEAD, tree) changing - not the tree simply being dirty.
+// Porcelain records status codes and paths, never content: with autoCommit off a worker can rewrite
+// the same already-dirty files every cycle and leave an identical status.
+function dirtyDigest(projectPath) {
+  const listed = runGit(projectPath, ['ls-files', '-m', '-o', '--exclude-standard', '-z', '--', '.']);
+
+  if (!listed.ok) {
+    return null;
+  }
+
+  const digest = crypto.createHash('sha1');
+
+  for (const file of listed.output.split('\0').filter(Boolean).sort()) {
+    const filePath = path.join(projectPath, file);
+    digest.update(file);
+
+    try {
+      const stats = fs.statSync(filePath);
+
+      digest.update(stats.size > maxDigestBytes ? `${stats.size}:${stats.mtimeMs}` : fs.readFileSync(filePath));
+    } catch {
+      digest.update('\0gone');
+    }
+  }
+
+  return digest.digest('hex');
+}
+
+// A checkpoint commit and a worker's own commit both move HEAD, so progress is the triple
+// (HEAD, tree, content) changing - not the tree simply being dirty.
 function gitSnapshot(projectPath) {
   const tree = runGit(projectPath, ['status', '--porcelain', '--', '.']);
+  const dirty = tree.ok ? dirtyDigest(projectPath) : null;
 
-  if (!tree.ok) {
+  if (!tree.ok || dirty === null) {
     return null;
   }
 
   const head = runGit(projectPath, ['rev-parse', 'HEAD']);
 
-  return { head: head.ok ? head.output : '', tree: tree.output };
+  return { head: head.ok ? head.output : '', tree: tree.output, dirty };
 }
 
 function madeNoChanges(before, after) {
-  return Boolean(before) && Boolean(after) && before.head === after.head && before.tree === after.tree;
+  return Boolean(before) && Boolean(after)
+    && before.head === after.head && before.tree === after.tree && before.dirty === after.dirty;
 }
 
 function insideGitWorkTree(projectPath) {
@@ -1997,8 +2042,14 @@ function insideGitWorkTree(projectPath) {
   return result.ok && result.output === 'true';
 }
 
+// A worker that committed its own work leaves nothing to commit, so its sha is this cycle's
+// checkpoint. HEAD advancing over a clean tree is what separates that from a real git failure.
+function workerCommitSha(headAtStart, head, tree) {
+  return headAtStart && head && head !== headAtStart && tree === '' ? head : null;
+}
+
 // Checkpoint messages are daemon-authored from verdict text alone; agents never run git.
-function checkpointCommit(loop, message) {
+function checkpointCommit(loop, message, headAtStart) {
   if (loop.autoCommit !== true) {
     return null;
   }
@@ -2006,27 +2057,32 @@ function checkpointCommit(loop, message) {
   const value = String(message).replace(/\s+/g, ' ').trim().slice(0, 72);
   const add = runGit(loop.projectPath, ['add', '-A', '.']);
   const commit = add.ok ? runGit(loop.projectPath, ['commit', '-m', value, '--', '.']) : add;
+  const head = runGit(loop.projectPath, ['rev-parse', 'HEAD']);
 
   if (!commit.ok) {
-    appendLoopLog(loop, `checkpoint failed: ${commit.output || 'git error'}`);
-    return null;
-  }
+    const tree = runGit(loop.projectPath, ['status', '--porcelain', '--', '.']);
+    const adopted = head.ok && tree.ok ? workerCommitSha(headAtStart, head.output, tree.output) : null;
 
-  const head = runGit(loop.projectPath, ['rev-parse', 'HEAD']);
+    if (!adopted) {
+      appendLoopLog(loop, `checkpoint failed: ${commit.output || 'git error'}`);
+    }
+
+    return adopted;
+  }
 
   return head.ok && head.output ? head.output : null;
 }
 
 // cycleNumber ties the sha to that cycle's plan position; null marks the final-pass checkpoint.
 function recordCheckpoint(loop, cycleNumber, message) {
-  const sha = checkpointCommit(loop, message);
+  const cycle = cycleNumber === null ? null : currentCycle(loop, cycleNumber);
+  const sha = checkpointCommit(loop, message, cycle && cycle.gitAtStart ? cycle.gitAtStart.head : '');
 
   if (!sha) {
     return loop;
   }
 
-  const cycle = cycleNumber === null ? null : currentCycle(loop, cycleNumber);
-  const task = cycle && Number.isInteger(cycle.task) ? cycle.task : null;
+  const task = cycleTaskNumber(cycle, null);
 
   return {
     ...loop,
@@ -2126,7 +2182,7 @@ async function createLoop(req, res) {
     const status = runGit(projectPath, ['status', '--porcelain', '--', '.']);
 
     if (!status.ok || status.output) {
-      sendJson(res, 400, { error: 'Auto-checkpoint needs a clean project tree: commit or stash your changes first.' });
+      sendJson(res, 400, { error: dirtyTreeError });
       return;
     }
   }
@@ -2138,12 +2194,15 @@ async function createLoop(req, res) {
     return;
   }
 
+  // The tree this gate approved, seeded files included: a queued loop revalidates against it.
+  const gitAtQueue = autoCommit ? gitSnapshot(projectPath) : null;
   const loop = store.enqueueLoop({
     project,
     projectPath,
     maxCycles: loopCycles(body && body.maxCycles),
     taskRetries: loopRetries(body && body.taskRetries),
     autoCommit,
+    ...(gitAtQueue ? { gitAtQueue } : {}),
     ...(gitPresent ? {} : { noGit: true }),
     ...(polish ? { polish: true } : {}),
     engine,
@@ -2476,5 +2535,8 @@ module.exports = {
   start,
   fillSlots,
   blockedEntry,
+  cycleTaskNumber,
+  gitSnapshot,
   madeNoChanges,
+  workerCommitSha,
 };
