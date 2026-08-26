@@ -5,6 +5,8 @@ const http = require('node:http');
 const { spawn, spawnSync } = require('node:child_process');
 
 const store = require('./store');
+const engines = require('./engines');
+const state = require('./state');
 const {
   taskPrompt,
   loopWorkerPrompt,
@@ -13,6 +15,7 @@ const {
   polishCriticPrompt,
   parseLoopResult,
   parseCriticVerdict,
+  parsePlanTasks,
   parsePolishVerdict,
 } = require('./prompts');
 
@@ -20,10 +23,11 @@ const pollMs = 1500;
 const maxResultText = 20000;
 const maxLogLines = 1000;
 const maxEventBytes = 16 * 1024;
-const knownEngines = new Set(['codex']);
+const knownEngines = new Set(engines.ids());
 const messageKinds = new Set(['info', 'question', 'results']);
-const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', 'maxed', 'plan_complete']);
+const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', 'maxed', 'partial', 'incomplete', 'plan_complete']);
 const defaultLoopCycles = 3;
+const defaultTaskRetries = 3;
 const runningActivity = new Map();
 const activeWorkers = new Map();
 
@@ -55,67 +59,20 @@ function trimResult(text) {
   return value.length > maxResultText ? value.slice(-maxResultText) : value;
 }
 
-function workerEvent(line) {
-  try {
-    const event = JSON.parse(line);
-    return event && typeof event === 'object' ? event : null;
-  } catch {
-    return null;
-  }
-}
+function recordActivity(id, engine, line) {
+  const parsed = engine.parseLine(line) || {};
+  const text = String(parsed.text || '').trim();
 
-function eventText(line, event = workerEvent(line)) {
-  if (!event) {
-    return line;
-  }
-
-  const item = event.item && typeof event.item === 'object' ? event.item : {};
-  const candidates = [
-    event.text,
-    event.message,
-    event.content,
-    item.text,
-    item.command,
-    item.aggregated_output,
-    item.output,
-    item.content,
-  ];
-
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string') {
-      return candidate;
-    }
+  if (text) {
+    const previous = runningActivity.get(id);
+    runningActivity.set(id, {
+      ts: new Date().toISOString(),
+      text: text.slice(0, 500),
+      toolCalls: (previous && previous.toolCalls ? previous.toolCalls : 0) + (parsed.tool ? 1 : 0),
+    });
   }
 
-  return typeof event.type === 'string' ? event.type : line;
-}
-
-function isToolEvent(event) {
-  const item = event && event.item;
-
-  return event && event.type === 'item.completed' && item && [
-    'command_execution',
-    'file_change',
-    'mcp_tool_call',
-    'web_search',
-  ].includes(item.type);
-}
-
-function recordActivity(id, line) {
-  const event = workerEvent(line);
-  const text = eventText(line, event).trim();
-
-  if (!text) {
-    return '';
-  }
-
-  const previous = runningActivity.get(id);
-  runningActivity.set(id, {
-    ts: new Date().toISOString(),
-    text: text.slice(0, 500),
-    toolCalls: (previous && previous.toolCalls ? previous.toolCalls : 0) + (isToolEvent(event) ? 1 : 0),
-  });
-  return text;
+  return parsed;
 }
 
 function recordEvent(type, data) {
@@ -147,35 +104,20 @@ function streamLines(stream, onLine) {
   });
 }
 
-function resolveCodex() {
-  if (process.platform !== 'win32') {
-    return 'codex';
+function spawnEngine(engine, args, options) {
+  const executable = engines.binary(engine, store.config.enginePaths);
+
+  if (!executable) {
+    throw new Error(`${engine.label} CLI not found on PATH. Install it (${engine.installHint}) and restart the daemon.`);
   }
 
-  const directories = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  const extensions = (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';');
-
-  for (const directory of directories) {
-    for (const extension of extensions) {
-      const candidate = path.join(directory, `codex${extension}`);
-
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-  }
-
-  return 'codex';
-}
-
-function spawnCodex(args, options) {
-  const executable = resolveCodex();
+  const settings = engine.env ? { ...options, env: engine.env(process.env) } : options;
 
   if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable)) {
-    return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', executable, ...args], options);
+    return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', executable, ...args], settings);
   }
 
-  return spawn(executable, args, options);
+  return spawn(executable, args, settings);
 }
 
 function taskkillPath() {
@@ -444,6 +386,39 @@ function readWorkerOutput(outputPath, fallback) {
   }
 }
 
+function trackTail(tail, parsed) {
+  if (!parsed) {
+    return;
+  }
+
+  if (typeof parsed.costUsd === 'number') {
+    tail.costUsd = parsed.costUsd;
+  }
+
+  if (typeof parsed.result === 'string' && parsed.result) {
+    tail.result = parsed.result;
+    return;
+  }
+
+  const text = String(parsed.text || '').trim();
+
+  if (!text) {
+    return;
+  }
+
+  tail.text = text;
+
+  if (parsed.message) {
+    tail.message = text;
+  }
+}
+
+function finalText(engine, outputPath, tail) {
+  const fallback = tail.message || tail.text;
+
+  return engine.usesOutputFile ? readWorkerOutput(outputPath, fallback) : (tail.result || fallback);
+}
+
 function timeoutMinutes() {
   const value = Number(store.config.taskTimeoutMin);
   return Number.isFinite(value) ? Math.max(1, value) : 45;
@@ -458,6 +433,20 @@ function loopCycles(value) {
 
   if (!Number.isFinite(parsed)) {
     return defaultLoopCycles;
+  }
+
+  return Math.min(50, Math.max(1, Math.trunc(parsed)));
+}
+
+function loopRetries(value) {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+    return defaultTaskRetries;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed)) {
+    return defaultTaskRetries;
   }
 
   return Math.min(10, Math.max(1, Math.trunc(parsed)));
@@ -492,7 +481,12 @@ function currentCycle(loop, cycleNumber) {
   return cycles.find((cycle) => cycle && cycle.n === cycleNumber) || null;
 }
 
+// The pass latch: a loop with blocked tasks is never "passed", whatever its cycles say.
 function hasPassedCycle(loop) {
+  if (Array.isArray(loop.blocked) && loop.blocked.length) {
+    return false;
+  }
+
   const cycles = Array.isArray(loop.cycles) ? loop.cycles : [];
 
   return cycles.some((cycle) => (
@@ -609,6 +603,7 @@ function completeTask(task, details) {
         : fallbackSummary(details.resultText, status, details.timedOut),
     resultText: trimResult(details.resultText),
     exitCode: details.exitCode,
+    ...(typeof details.costUsd === 'number' ? { costUsd: details.costUsd } : {}),
     ...(reason ? { reason } : {}),
     durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
     finishedAt,
@@ -672,10 +667,13 @@ function completeLoop(loop, status, summary, reason) {
   }
 
   try {
+    const costUsd = state.sumCycleCosts(completed.cycles);
+
     store.writeResult({
       id: loop.id,
       status: completed.status,
       summary: completed.summary,
+      ...(costUsd !== null ? { costUsd } : {}),
       durationMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
       finishedAt,
       ...(completed.reason ? { reason: completed.reason } : {}),
@@ -757,30 +755,22 @@ function finishLoopSession(loop, cycle, onFinish, details) {
 }
 
 function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
-  const model = loop.model || store.config.model || 'gpt-5.6-terra';
+  const engine = engines.get(loop.engine) || engines.get(store.config.defaultEngine);
+  const model = engines.modelFor(engine, store.config, loop.model);
   const cwd = loop.projectPath;
-  const outputPath = path.join(
-    store.paths.results,
-    `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`,
-  );
-  const args = [
-    'exec',
-    '--json',
-    '--sandbox', 'workspace-write',
-    '--config', 'approval_policy="on-request"',
-    '--config', 'approvals_reviewer="auto_review"',
-    '--config', 'sandbox_workspace_write.network_access=false',
-    '--skip-git-repo-check',
-    '--output-last-message', outputPath,
-    '--model', model,
-    '-',
-  ];
+  const outputPath = engine.usesOutputFile
+    ? path.join(
+      store.paths.results,
+      `.${loop.id}.cycle-${cycle.n}.${role}.${Date.now()}.last-message.tmp`,
+    )
+    : null;
+  const args = engine.args({ model, outputPath });
   let child;
 
-  appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} ===`);
+  appendLoopLog(loop, `=== cycle ${cycle.n} - ${role} (${engine.label}) ===`);
 
   try {
-    child = spawnCodex(args, {
+    child = spawnEngine(engine, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -797,7 +787,7 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
     return;
   }
 
-  let lastTextLine = '';
+  const tail = { text: '', message: '', result: '' };
   let inputFailed = false;
   let timedOut = false;
   let settled = false;
@@ -806,12 +796,7 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
   activeWorkers.set(loop.id, worker);
   const captureLine = (line) => {
     appendSessionLog(loop, cycle, role, line);
-
-    const text = recordActivity(loop.id, line);
-
-    if (text) {
-      lastTextLine = text;
-    }
+    trackTail(tail, recordActivity(loop.id, engine, line));
   };
   const finish = (exitCode, signal, forceFailed = false, reason) => {
     if (settled || stopping) {
@@ -830,9 +815,10 @@ function spawnLoopSession(loop, cycle, role, prompt, onFinish) {
       signal,
       forceFailed,
       reason: timedOut ? `${role}_timed_out` : reason || (inputFailed ? `${role}_input_failed` : undefined),
-      resultText: readWorkerOutput(outputPath, lastTextLine),
+      resultText: finalText(engine, outputPath, tail),
       timedOut,
       cancelled: worker.cancelled,
+      ...(typeof tail.costUsd === 'number' ? { costUsd: tail.costUsd } : {}),
     });
   };
 
@@ -881,6 +867,19 @@ function startNextLoopCycle(loop) {
   });
 }
 
+function budgetExhaustedEnd(loop) {
+  const done = Array.isArray(loop.done) ? loop.done : [];
+
+  if (!done.length) {
+    return { status: 'maxed', summary: 'Reached the maximum cycle count without a passing verdict.' };
+  }
+
+  return {
+    status: 'incomplete',
+    summary: `Completed ${done.length} plan item${done.length === 1 ? '' : 's'} before the cycle budget ran out; work remains.`,
+  };
+}
+
 function startLoopCycle(loop) {
   if (loop.cancelRequested) {
     completeLoop(loop, 'cancelled', 'Cancelled.', 'cancelled');
@@ -892,18 +891,24 @@ function startLoopCycle(loop) {
   const polishing = hasPassedCycle(loop);
 
   if (cycleNumber > loop.maxCycles) {
+    const exhausted = budgetExhaustedEnd(loop);
+
     completeLoop(
       loop,
-      polishing ? 'passed' : 'maxed',
-      polishing ? `Passed after ${loop.maxCycles} cycles.` : 'Reached the maximum cycle count without a passing verdict.',
+      polishing ? 'passed' : exhausted.status,
+      polishing ? `Passed after ${loop.maxCycles} cycles.` : exhausted.summary,
     );
     return;
   }
 
   const previous = cycles[cycles.length - 1];
   const startedAt = new Date().toISOString();
+  // Plan position at cycle start: completed and blocked items each advanced one slot.
+  const taskNumber = (Array.isArray(loop.done) ? loop.done.length : 0)
+    + (Array.isArray(loop.blocked) ? loop.blocked.length : 0) + 1;
   const cycle = {
     n: cycleNumber,
+    ...(polishing ? {} : { task: taskNumber }),
     status: 'running',
     phase: polishing ? 'polish' : 'worker',
     startedAt,
@@ -928,7 +933,7 @@ function startLoopCycle(loop) {
       'worker',
       polishing
         ? polishWorkerPrompt(runningLoop, previous && previous.fixes)
-        : loopWorkerPrompt(runningLoop, previous && previous.fixes),
+        : loopWorkerPrompt(runningLoop, previous && previous.status === 'failed' ? previous.fixes : undefined),
       (details) => finishLoopWorker(runningLoop, cycleNumber, details),
     );
   } catch (error) {
@@ -972,6 +977,7 @@ function finishLoopWorker(loop, cycleNumber, details) {
         phase: cyclePhase(cycle, 'worker'),
         finishedAt,
         durationMs,
+        ...(typeof details.costUsd === 'number' ? { costUsd: details.costUsd } : {}),
       });
       completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
       return;
@@ -991,6 +997,7 @@ function finishLoopWorker(loop, cycleNumber, details) {
       workerFinishedAt: finishedAt,
       workerDurationMs: durationMs,
       workerExitCode: details.exitCode,
+      ...(typeof details.costUsd === 'number' ? { workerCostUsd: details.costUsd } : {}),
     };
 
     if (reason) {
@@ -1019,6 +1026,29 @@ function finishLoopWorker(loop, cycleNumber, details) {
       return;
     }
 
+    // Workers rewrite STATE.md every cycle, so a clean tree means the worker did nothing.
+    if (cycle.phase !== 'polish' && !current.noGit) {
+      const status = runGit(current.projectPath, ['status', '--porcelain', '--', '.']);
+
+      if (status.ok && !status.output) {
+        registerFailedCycle(current, cycleNumber, {
+          ...workerFields,
+          status: 'failed',
+          phase: 'worker',
+          verdict: 'FAIL',
+          fixes: 'The last cycle changed no files. Make real progress on the next incomplete PLAN.md item.',
+          summary: `Cycle ${cycleNumber} worker made no changes.`,
+          finishedAt,
+          durationMs,
+          reason: 'worker made no changes',
+        }, {
+          type: 'worker_finished',
+          data: { id: loop.id, cycle: cycleNumber, status: 'failed', reason: 'worker made no changes' },
+        });
+        return;
+      }
+    }
+
     const awaitingCritic = updateCycle(current, cycleNumber, {
       ...workerFields,
       status: 'running',
@@ -1038,7 +1068,9 @@ function finishLoopWorker(loop, cycleNumber, details) {
         awaitingCritic,
         currentCycle(awaitingCritic, cycleNumber),
         'critic',
-        cycle.phase === 'polish' ? polishCriticPrompt(details.resultText) : criticPrompt(details.resultText),
+        cycle.phase === 'polish'
+          ? polishCriticPrompt(details.resultText)
+          : criticPrompt(details.resultText, awaitingCritic.blocked),
         (criticDetails) => finishLoopCritic(awaitingCritic, cycleNumber, criticDetails),
       );
     } catch (error) {
@@ -1062,6 +1094,60 @@ function finishLoopWorker(loop, cycleNumber, details) {
   } catch (error) {
     failLoopTransition(current, cycleNumber, error);
   }
+}
+
+// Worker and critic run as separate engine sessions; the cycle's spend is their sum.
+function cycleCostUsd(cycle, criticCost) {
+  const worker = cycle && typeof cycle.workerCostUsd === 'number' ? cycle.workerCostUsd : null;
+  const critic = typeof criticCost === 'number' ? criticCost : null;
+
+  if (worker === null && critic === null) {
+    return {};
+  }
+
+  return { costUsd: state.roundCost((worker || 0) + (critic || 0)) };
+}
+
+// Shared by critic FAIL verdicts and no-progress cycles: counts the streak,
+// blocks the current task at the retry budget, and picks the end state at the cycle cap.
+function registerFailedCycle(current, cycleNumber, cycleFields, event) {
+  const streak = Math.max(0, Number(current.failStreak) || 0) + 1;
+  const blocking = streak >= loopRetries(current.taskRetries);
+  const done = Array.isArray(current.done) ? current.done : [];
+  const entry = blocking
+    ? {
+      task: done.length + 1,
+      item: typeof current.nextItem === 'string' && current.nextItem ? current.nextItem : 'first PLAN.md item',
+    }
+    : null;
+  const loop = {
+    ...current,
+    failStreak: entry ? 0 : streak,
+    ...(entry ? { blocked: [...(Array.isArray(current.blocked) ? current.blocked : []), entry] } : {}),
+  };
+  let updated = updateCycle(loop, cycleNumber, entry
+    ? { ...cycleFields, status: 'blocked', summary: `Blocked task ${entry.task}: ${entry.item}` }
+    : cycleFields);
+
+  if (entry) {
+    updated = recordCheckpoint(updated, cycleNumber, `wip(loop): task ${entry.task} blocked - ${entry.item}`);
+  }
+
+  store.writeTask(updated, 'running');
+  recordEvent(event.type, event.data);
+
+  if (entry) {
+    recordEvent('task_blocked', { id: current.id, cycle: cycleNumber, task: entry.task, item: entry.item });
+  }
+
+  if (cycleNumber >= updated.maxCycles) {
+    const exhausted = budgetExhaustedEnd(updated);
+
+    completeLoop(updated, exhausted.status, exhausted.summary);
+    return;
+  }
+
+  startNextLoopCycle(updated);
 }
 
 function finishLoopCritic(loop, cycleNumber, details) {
@@ -1094,6 +1180,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
         phase: cyclePhase(cycle, 'critic'),
         finishedAt,
         durationMs,
+        ...cycleCostUsd(cycle, details.costUsd),
       });
       completeLoop(cancelled, 'cancelled', 'Cancelled.', 'cancelled');
       return;
@@ -1115,6 +1202,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
         finishedAt,
         durationMs,
         reason,
+        ...cycleCostUsd(cycle, details.costUsd),
       });
       store.writeTask(invalid, 'running');
       recordEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
@@ -1140,6 +1228,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
           summary: cycle.workerSummary || 'Critic shipped.',
           finishedAt,
           durationMs,
+          ...cycleCostUsd(cycle, details.costUsd),
         });
         store.writeTask(shipped, 'running');
         recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'SHIP' });
@@ -1155,6 +1244,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
         summary: `Polish improvement: ${verdict.improvement}`,
         finishedAt,
         durationMs,
+        ...cycleCostUsd(cycle, details.costUsd),
       });
       store.writeTask(improved, 'running');
       recordEvent('critic_verdict', {
@@ -1178,16 +1268,24 @@ function finishLoopCritic(loop, cycleNumber, details) {
     }
 
     if (verdict.verdict === 'PASS') {
-      const passed = updateCycle(current, cycleNumber, {
+      const blockedCount = Array.isArray(current.blocked) ? current.blocked.length : 0;
+      let passed = updateCycle(current, cycleNumber, {
         status: 'passed',
         phase: 'critic',
         verdict: 'PASS',
         summary: cycle.workerSummary || 'Critic passed.',
         finishedAt,
         durationMs,
+        ...cycleCostUsd(cycle, details.costUsd),
       });
+      passed = recordCheckpoint(passed, null, 'wip(loop): final pass');
       store.writeTask(passed, 'running');
       recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'PASS' });
+
+      if (blockedCount) {
+        completeLoop(passed, 'partial', `Passed with ${blockedCount} blocked task${blockedCount === 1 ? '' : 's'}.`);
+        return;
+      }
 
       if (current.polish === true && cycleNumber < current.maxCycles) {
         startNextLoopCycle(passed);
@@ -1198,7 +1296,45 @@ function finishLoopCritic(loop, cycleNumber, details) {
       return;
     }
 
-    const failed = updateCycle(current, cycleNumber, {
+    if (verdict.verdict === 'CONTINUE') {
+      const done = [...(Array.isArray(current.done) ? current.done : []), verdict.done];
+      let continued = updateCycle(
+        { ...current, done, nextItem: verdict.next, failStreak: 0 },
+        cycleNumber,
+        {
+          status: 'continue',
+          phase: 'critic',
+          verdict: 'CONTINUE',
+          done: verdict.done,
+          next: verdict.next,
+          summary: `Task ${done.length} done: ${verdict.done}`,
+          finishedAt,
+          durationMs,
+          ...cycleCostUsd(cycle, details.costUsd),
+        },
+      );
+      continued = recordCheckpoint(continued, cycleNumber, `wip(loop): task ${done.length} - ${verdict.done}`);
+      store.writeTask(continued, 'running');
+      recordEvent('critic_verdict', {
+        id: loop.id,
+        cycle: cycleNumber,
+        verdict: 'CONTINUE',
+        done: verdict.done,
+        next: verdict.next,
+      });
+
+      if (cycleNumber >= current.maxCycles) {
+        const exhausted = budgetExhaustedEnd(continued);
+
+        completeLoop(continued, exhausted.status, exhausted.summary);
+        return;
+      }
+
+      startNextLoopCycle(continued);
+      return;
+    }
+
+    registerFailedCycle(current, cycleNumber, {
       status: 'failed',
       phase: 'critic',
       verdict: 'FAIL',
@@ -1206,21 +1342,11 @@ function finishLoopCritic(loop, cycleNumber, details) {
       summary: `Critic failed: ${verdict.fixes}`,
       finishedAt,
       durationMs,
+      ...cycleCostUsd(cycle, details.costUsd),
+    }, {
+      type: 'critic_verdict',
+      data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: verdict.fixes },
     });
-    store.writeTask(failed, 'running');
-    recordEvent('critic_verdict', {
-      id: loop.id,
-      cycle: cycleNumber,
-      verdict: 'FAIL',
-      fixes: verdict.fixes,
-    });
-
-    if (cycleNumber >= current.maxCycles) {
-      completeLoop(failed, 'maxed', 'Reached the maximum cycle count without a passing verdict.');
-      return;
-    }
-
-    startNextLoopCycle(failed);
   } catch (error) {
     failLoopTransition(current, cycleNumber, error);
   }
@@ -1228,12 +1354,20 @@ function finishLoopCritic(loop, cycleNumber, details) {
 
 function startLoop(loop) {
   const startedAt = new Date().toISOString();
+  let planTasks = [];
+
+  try {
+    planTasks = parsePlanTasks(fs.readFileSync(path.join(loop.projectPath, 'PLAN.md'), 'utf8'));
+  } catch {
+  }
+
   const runningLoop = {
     ...loop,
     status: 'running',
     startedAt,
     cycle: 0,
     cycles: Array.isArray(loop.cycles) ? loop.cycles : [],
+    ...(planTasks.length ? { planTasks } : {}),
   };
 
   try {
@@ -1255,26 +1389,18 @@ function startLoop(loop) {
 }
 
 function spawnWorker(task) {
-  const model = task.model || store.config.model || 'gpt-5.6-terra';
+  const engine = engines.get(task.engine) || engines.get(store.config.defaultEngine);
+  const model = engines.modelFor(engine, store.config, task.model);
   const cwd = task.cwd ? path.resolve(task.cwd) : path.join(store.paths.root, 'workspace');
-  const outputPath = path.join(store.paths.results, `.${task.id}.${Date.now()}.last-message.tmp`);
-  const args = [
-    'exec',
-    '--json',
-    '--sandbox', 'workspace-write',
-    '--config', 'approval_policy="on-request"',
-    '--config', 'approvals_reviewer="auto_review"',
-    '--config', 'sandbox_workspace_write.network_access=false',
-    '--skip-git-repo-check',
-    '--output-last-message', outputPath,
-    '--model', model,
-    '-',
-  ];
+  const outputPath = engine.usesOutputFile
+    ? path.join(store.paths.results, `.${task.id}.${Date.now()}.last-message.tmp`)
+    : null;
+  const args = engine.args({ model, outputPath });
   let child;
 
   try {
     fs.mkdirSync(cwd, { recursive: true });
-    child = spawnCodex(args, {
+    child = spawnEngine(engine, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -1290,7 +1416,7 @@ function spawnWorker(task) {
     return;
   }
 
-  let lastTextLine = '';
+  const tail = { text: '', message: '', result: '' };
   let inputFailed = false;
   let timedOut = false;
   let settled = false;
@@ -1304,11 +1430,7 @@ function spawnWorker(task) {
       console.error(`Failed to write log for ${task.id}: ${error.message}`);
     }
 
-    const text = recordActivity(task.id, line);
-
-    if (text) {
-      lastTextLine = text;
-    }
+    trackTail(tail, recordActivity(task.id, engine, line));
   };
   const finish = (exitCode, signal, forceFailed = false, reason) => {
     if (settled || stopping) {
@@ -1323,9 +1445,10 @@ function spawnWorker(task) {
       signal,
       forceFailed,
       reason: timedOut ? 'timed_out' : reason || (inputFailed ? 'worker_input_failed' : undefined),
-      resultText: readWorkerOutput(outputPath, lastTextLine),
+      resultText: finalText(engine, outputPath, tail),
       timedOut,
       cancelled: worker.cancelled,
+      ...(typeof tail.costUsd === 'number' ? { costUsd: tail.costUsd } : {}),
     });
   };
 
@@ -1429,48 +1552,6 @@ function resultForTask(task) {
   }
 }
 
-function dashboardTask(task, activity) {
-  const startedAt = taskTime(task, 'startedAt');
-  const value = {
-    ...task,
-    engine: task.engine || 'codex',
-    model: task.model || 'default',
-  };
-
-  if (!activity) {
-    return value;
-  }
-
-  return {
-    ...value,
-    elapsedMs: startedAt ? Math.max(0, Date.now() - startedAt) : 0,
-    lastActivity: activity.text || null,
-    toolCalls: activity.toolCalls || 0,
-  };
-}
-
-function dashboardRecentTask(task) {
-  const result = resultForTask(task);
-  const value = {
-    ...dashboardTask(task),
-    prompt: task.type === 'loop'
-      ? `Project: ${task.project || ''}`
-      : typeof task.prompt === 'string' ? task.prompt : '',
-  };
-
-  if (!result) {
-    return value;
-  }
-
-  for (const field of ['status', 'summary', 'reason', 'durationMs', 'finishedAt', 'costUsd']) {
-    if (Object.hasOwn(result, field)) {
-      value[field] = result[field];
-    }
-  }
-
-  return value;
-}
-
 function dashboardEvent(event) {
   const id = typeof event.id === 'string' ? event.id : '';
   const task = id ? `task ${id}` : 'task';
@@ -1502,10 +1583,18 @@ function dashboardEvent(event) {
   }
 
   if (event.type === 'critic_verdict') {
-    const verdict = ['PASS', 'FAIL', 'IMPROVE', 'SHIP'].includes(event.verdict) ? event.verdict : 'FAIL';
-    const fixes = ['FAIL', 'IMPROVE'].includes(verdict) && typeof event.fixes === 'string' ? `: ${event.fixes}` : '';
-    const kind = verdict === 'PASS' || verdict === 'SHIP' ? 'result' : verdict === 'IMPROVE' ? 'info' : 'error';
-    return { ...value, kind, text: `${loop}${cycle} critic ${verdict}${fixes}` };
+    const verdict = ['PASS', 'FAIL', 'IMPROVE', 'SHIP', 'CONTINUE'].includes(event.verdict) ? event.verdict : 'FAIL';
+    const detail = ['FAIL', 'IMPROVE'].includes(verdict) && typeof event.fixes === 'string'
+      ? `: ${event.fixes}`
+      : verdict === 'CONTINUE' && typeof event.done === 'string' ? `: done: ${event.done}` : '';
+    const kind = ['PASS', 'SHIP', 'CONTINUE'].includes(verdict) ? 'result' : verdict === 'IMPROVE' ? 'info' : 'error';
+    return { ...value, kind, text: `${loop}${cycle} critic ${verdict}${detail}` };
+  }
+
+  if (event.type === 'task_blocked') {
+    const item = typeof event.item === 'string' ? `: ${event.item}` : '';
+    const taskNumber = Number.isInteger(event.task) ? ` task ${event.task}` : '';
+    return { ...value, kind: 'error', text: `${loop}${taskNumber} blocked${item}` };
   }
 
   if (event.type === 'critic_invalid') {
@@ -1593,22 +1682,53 @@ function recentEvents() {
 }
 
 function daemonState() {
+  const now = Date.now();
+  const defaultEngine = store.config.defaultEngine;
   const pendingTasks = sortPending(store.listTasks('pending'));
   const runningTasks = store.listTasks('running');
   const completedTasks = store.listTasks('done');
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
+  const todayMs = todayStart.getTime();
   const done = completedTasks.filter((task) => (
     task.status === 'done' || (task.type === 'loop' && task.status === 'passed')
   )).length;
   const failed = completedTasks.filter((task) => (
     task.status === 'failed' || (task.type === 'loop' && task.status === 'maxed')
   )).length;
-  const finishedToday = completedTasks.filter((task) => taskTime(task, 'finishedAt') >= todayStart.getTime()).length;
-  const recent = completedTasks
-    .sort((left, right) => taskTime(right, 'finishedAt') - taskTime(left, 'finishedAt'))
-    .slice(0, 20)
-    .map(dashboardRecentTask);
+  const finishedToday = completedTasks.filter((task) => taskTime(task, 'finishedAt') >= todayMs).length;
+  const results = new Map();
+  const resultFor = (task) => {
+    if (!results.has(task.id)) {
+      results.set(task.id, resultForTask(task));
+    }
+
+    return results.get(task.id);
+  };
+  const taskCostToday = (task) => {
+    if (task.type === 'loop') {
+      return state.sumCycleCosts(task.cycles, todayMs);
+    }
+
+    if (taskTime(task, 'finishedAt') < todayMs) {
+      return null;
+    }
+
+    const result = resultFor(task);
+
+    return result && typeof result.costUsd === 'number' && Number.isFinite(result.costUsd)
+      ? result.costUsd
+      : null;
+  };
+  let todayCost = null;
+
+  for (const task of [...runningTasks, ...completedTasks]) {
+    const cost = taskCostToday(task);
+
+    if (cost !== null) {
+      todayCost = (todayCost || 0) + cost;
+    }
+  }
 
   return {
     daemon: {
@@ -1617,23 +1737,42 @@ function daemonState() {
       port: daemonInfo.port,
       startedAt: daemonInfo.startedAt,
       ts: new Date().toISOString(),
+      engine: defaultEngine,
     },
     bridge: {
       running: bridgeRunning(),
+    },
+    engines: {
+      selected: defaultEngine,
+      available: engines.ids().map((id) => {
+        const engine = engines.get(id);
+
+        return {
+          id,
+          label: engine.label,
+          installed: engines.available(engine, store.config.enginePaths),
+        };
+      }),
     },
     stats: {
       pending: pendingTasks.length,
       running: runningTasks.length,
       done,
       failed,
-      today: { tasks: finishedToday },
+      today: {
+        tasks: finishedToday,
+        ...(todayCost !== null ? { costUsd: state.roundCost(todayCost) } : {}),
+      },
       totalDone: done,
     },
     tasks: {
-      pending: pendingTasks.map((task) => dashboardTask(task)),
-      running: runningTasks.map((task) => dashboardTask(task, runningActivity.get(task.id))),
+      pending: pendingTasks.map((task) => state.publicPending(task, defaultEngine)),
+      running: runningTasks.map((task) => state.publicRunning(task, runningActivity.get(task.id), defaultEngine, now)),
       blocked: [],
-      recent,
+      recent: completedTasks
+        .sort((left, right) => taskTime(right, 'finishedAt') - taskTime(left, 'finishedAt'))
+        .slice(0, 20)
+        .map((task) => state.publicRecent(task, resultFor(task), defaultEngine)),
     },
     messages: store.readMessages(50),
     events: recentEvents(),
@@ -1707,10 +1846,10 @@ async function dispatch(req, res) {
     return;
   }
 
-  const engine = body.engine || 'codex';
+  const engine = body.engine || store.config.defaultEngine;
 
-  if (engine !== 'codex') {
-    sendJson(res, 400, { error: 'Only codex is supported.' });
+  if (!knownEngines.has(engine)) {
+    sendJson(res, 400, { error: `Unsupported engine: ${engine}.` });
     return;
   }
 
@@ -1801,6 +1940,71 @@ function hasActiveLoop(projectPath) {
   return false;
 }
 
+function runGit(projectPath, args) {
+  try {
+    const result = spawnSync('git', args, {
+      cwd: projectPath,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 15000,
+    });
+
+    if (result.error || result.status !== 0) {
+      const output = String(result.stderr || result.stdout || (result.error && result.error.message) || '').trim();
+      return { ok: false, output };
+    }
+
+    return { ok: true, output: String(result.stdout || '').trim() };
+  } catch (error) {
+    return { ok: false, output: error.message };
+  }
+}
+
+function insideGitWorkTree(projectPath) {
+  const result = runGit(projectPath, ['rev-parse', '--is-inside-work-tree']);
+  return result.ok && result.output === 'true';
+}
+
+// Checkpoint messages are daemon-authored from verdict text alone; agents never run git.
+function checkpointCommit(loop, message) {
+  if (loop.autoCommit !== true) {
+    return null;
+  }
+
+  const value = String(message).replace(/\s+/g, ' ').trim().slice(0, 72);
+  const add = runGit(loop.projectPath, ['add', '-A', '.']);
+  const commit = add.ok ? runGit(loop.projectPath, ['commit', '-m', value]) : add;
+
+  if (!commit.ok) {
+    appendLoopLog(loop, `checkpoint failed: ${commit.output || 'git error'}`);
+    return null;
+  }
+
+  const head = runGit(loop.projectPath, ['rev-parse', 'HEAD']);
+
+  return head.ok && head.output ? head.output : null;
+}
+
+// cycleNumber ties the sha to that cycle's plan position; null marks the final-pass checkpoint.
+function recordCheckpoint(loop, cycleNumber, message) {
+  const sha = checkpointCommit(loop, message);
+
+  if (!sha) {
+    return loop;
+  }
+
+  const cycle = cycleNumber === null ? null : currentCycle(loop, cycleNumber);
+  const task = cycle && Number.isInteger(cycle.task) ? cycle.task : null;
+
+  return {
+    ...loop,
+    checkpointShas: [
+      ...(Array.isArray(loop.checkpointShas) ? loop.checkpointShas : []),
+      { ...(task === null ? {} : { task }), sha },
+    ],
+  };
+}
+
 function seedLoopFiles(projectPath) {
   const defaults = [
     [
@@ -1882,6 +2086,19 @@ async function createLoop(req, res) {
     return;
   }
 
+  const gitPresent = insideGitWorkTree(projectPath);
+  const autoCommit = !(body && body.autoCommit === false) && gitPresent;
+
+  // Must run before seedLoopFiles: seeded STATE.md and GUIDELINES.md would trip it.
+  if (autoCommit) {
+    const status = runGit(projectPath, ['status', '--porcelain', '--', '.']);
+
+    if (!status.ok || status.output) {
+      sendJson(res, 400, { error: 'Auto-checkpoint needs a clean project tree: commit or stash your changes first.' });
+      return;
+    }
+  }
+
   try {
     seedLoopFiles(projectPath);
   } catch (error) {
@@ -1893,6 +2110,9 @@ async function createLoop(req, res) {
     project,
     projectPath,
     maxCycles: loopCycles(body && body.maxCycles),
+    taskRetries: loopRetries(body && body.taskRetries),
+    autoCommit,
+    ...(gitPresent ? {} : { noGit: true }),
     ...(polish ? { polish: true } : {}),
     engine,
     model: store.config.model,
@@ -2026,7 +2246,7 @@ async function handleRequest(req, res) {
   }
 
   if (req.method === 'GET' && requestPath === '/api/state') {
-    sendJson(res, 200, daemonState());
+    sendJson(res, 200, state.sanitizeState(daemonState()));
     return;
   }
 
