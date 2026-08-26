@@ -4,3 +4,5 @@ state/
 config.local.json
 .DS_Store
 Thumbs.db
+workspace/
+dashboard-tour/
