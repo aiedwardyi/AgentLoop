@@ -1,10 +1,10 @@
 {
   "name": "agentloop",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Sequential fresh-context agent orchestrator",
   "scripts": {
-    "test": "node test/sandbox.test.js"
+    "test": "node test/daemon.test.js && node test/engines.test.js && node test/prompts.test.js && node test/sandbox.test.js && node test/state.test.js && node test/tools.test.js && node test/ui.test.js"
   },
   "engines": {
     "node": ">=18"

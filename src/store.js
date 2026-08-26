@@ -49,6 +49,8 @@ function loadConfig() {
     mcpBridge: {
       port: loaded.mcpBridge?.port ?? defaults.mcpBridge.port,
     },
+    models: loaded.models ?? {},
+    enginePaths: loaded.enginePaths ?? {},
   };
 
   if (loaded.model) {

@@ -3,35 +3,56 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
+const engines = require('../src/engines');
+
 const daemonSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'daemon.js'), 'utf8');
-const sandboxArgs = [
-  "'--sandbox', 'workspace-write'",
-  "'approval_policy=\"on-request\"'",
-  "'approvals_reviewer=\"auto_review\"'",
-  "'sandbox_workspace_write.network_access=false'",
-];
+const engineSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'engines.js'), 'utf8');
 
-function getSessionArgs(functionName) {
-  const functionStart = daemonSource.indexOf(`function ${functionName}(`);
-  const functionEnd = daemonSource.indexOf('\nfunction ', functionStart + 1);
-  const argsStart = daemonSource.indexOf('  const args = [', functionStart);
-  const argsEnd = daemonSource.indexOf('\n  ];', argsStart);
-
-  assert.notEqual(functionStart, -1);
-  assert.ok(argsStart > functionStart);
-  assert.ok(argsEnd > argsStart);
-  assert.ok(functionEnd === -1 || argsEnd < functionEnd);
-  return daemonSource.slice(argsStart, argsEnd);
+function argsFor(id) {
+  const engine = engines.get(id);
+  return engine.args({ model: 'test-model', outputPath: 'out.tmp' });
 }
 
+function pairFollowing(args, flag) {
+  return args[args.indexOf(flag) + 1];
+}
+
+test('no engine bypasses its approval layer', () => {
+  for (const source of [daemonSource, engineSource]) {
+    assert.doesNotMatch(source, /--dangerously-bypass-approvals-and-sandbox/);
+    assert.doesNotMatch(source, /--dangerously-skip-permissions/);
+  }
+});
+
 test('Codex sessions use workspace sandboxing', () => {
-  assert.doesNotMatch(daemonSource, /--dangerously-bypass-approvals-and-sandbox/);
+  const args = argsFor('codex');
 
-  for (const functionName of ['spawnLoopSession', 'spawnWorker']) {
-    const args = getSessionArgs(functionName);
+  assert.equal(pairFollowing(args, '--sandbox'), 'workspace-write');
+  assert.ok(args.includes('approval_policy="on-request"'));
+  assert.ok(args.includes('approvals_reviewer="auto_review"'));
+  assert.ok(args.includes('sandbox_workspace_write.network_access=false'));
+});
 
-    for (const expectedArg of sandboxArgs) {
-      assert.ok(args.includes(expectedArg), `${functionName} is missing ${expectedArg}`);
-    }
+test('Claude sessions accept edits without inheriting operator config', () => {
+  const args = argsFor('claude');
+
+  assert.equal(pairFollowing(args, '--permission-mode'), 'acceptEdits');
+  assert.ok(args.includes('--safe-mode'));
+  assert.ok(args.includes('--strict-mcp-config'));
+  assert.equal(pairFollowing(args, '--disallowedTools'), 'WebFetch,WebSearch');
+});
+
+test('Claude workers do not inherit a parent Claude Code session', () => {
+  const env = engines.get('claude').env({ PATH: '/usr/bin', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_SSE_PORT: '9' });
+
+  assert.equal(env.PATH, '/usr/bin');
+  assert.equal('CLAUDECODE' in env, false);
+  assert.equal('CLAUDE_CODE_ENTRYPOINT' in env, false);
+  assert.equal('CLAUDE_CODE_SSE_PORT' in env, false);
+});
+
+test('every engine passes the selected model through', () => {
+  for (const id of engines.ids()) {
+    assert.equal(pairFollowing(argsFor(id), '--model'), 'test-model', `${id} drops the model`);
   }
 });

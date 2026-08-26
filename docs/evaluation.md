@@ -13,6 +13,6 @@ The first worker's own suite passed. A fresh critic tested beyond it, found a re
 
 ## Reproduce
 
-1. Start the daemon and select **+ New**, then **Loop**.
-2. Set **Project** to `examples/query-parser` and **Max cycles** to `3`.
+1. Start the daemon and select **+ New loop**.
+2. Set **Project folder** to `examples/query-parser` and **Max cycles** to `3`.
 3. Leave polish disabled and select **Start loop**.
