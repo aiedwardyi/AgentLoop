@@ -3,6 +3,20 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+// existsSync also accepts directories and non-executable files, and spawn() only fails later.
+function executableFile(candidate) {
+  try {
+    if (!fs.statSync(candidate).isFile()) {
+      return false;
+    }
+
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function findOnPath(command) {
   const directories = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
   const extensions = process.platform === 'win32'
@@ -13,7 +27,7 @@ function findOnPath(command) {
     for (const extension of extensions) {
       const candidate = path.join(directory, `${command}${extension}`);
 
-      if (fs.existsSync(candidate)) {
+      if (executableFile(candidate)) {
         return candidate;
       }
     }

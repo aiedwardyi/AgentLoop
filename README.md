@@ -100,7 +100,7 @@ Requirements:
 
 - Node.js 18 or newer
 - Git
-- At least one engine CLI installed, authenticated, and on `PATH`: Codex CLI (`codex`) or Claude Code (`claude`)
+- At least one engine CLI installed, authenticated, and on `PATH`: Codex CLI (`codex`) or Claude Code (`claude`) 2.1.169 or newer, the release that added `--safe-mode`
 
 Windows:
 
@@ -119,17 +119,17 @@ This is optional: once connected, you can plan and launch real work on your mach
 1. In the dashboard, open **Connector** and select **Start**.
 2. Expose the local bridge on port 5758. For example:
 
-```powershell
-cloudflared tunnel --url http://127.0.0.1:5758
-```
+   ```powershell
+   cloudflared tunnel --url http://127.0.0.1:5758
+   ```
 
 3. Copy the authenticated connector URL from the Connector popover. Replace the local host with your tunnel host while preserving `/mcp?key=...`.
 
-```text
-https://<your-tunnel-host>/mcp?key=<token-from-Connector>
-```
+   ```text
+   https://<your-tunnel-host>/mcp?key=<token-from-Connector>
+   ```
 
-Treat this URL as a secret; the token persists in state/mcp-token - delete that file and restart the bridge to rotate it.
+   Treat this URL as a secret; the token persists in state/mcp-token - delete that file and restart the bridge to rotate it.
 
 4. Add that URL as a custom connector in Claude or ChatGPT, then describe tasks in plain English.
 

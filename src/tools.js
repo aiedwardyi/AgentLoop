@@ -3,12 +3,18 @@ const http = require('node:http');
 
 const store = require('./store');
 
+// A non-numeric config value reaches http.request as-is and fails every tool call.
+function dashboardPort() {
+  const parsed = Number(store.config.dashboardPort);
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? parsed : 5757;
+}
+
 function daemonRequest(requestPath, body) {
   return new Promise((resolve, reject) => {
     const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const request = http.request({
       hostname: '127.0.0.1',
-      port: store.config.dashboardPort,
+      port: dashboardPort(),
       path: requestPath,
       method: data ? 'POST' : 'GET',
       headers: data ? {
@@ -197,7 +203,7 @@ async function callTool(params) {
     });
 
     return response.statusCode >= 200 && response.statusCode < 300
-      ? toolResult(response.value)
+      ? toolResult(response.value && typeof response.value === 'object' ? response.value : { ok: true })
       : toolFailure(daemonError(response));
   }
 

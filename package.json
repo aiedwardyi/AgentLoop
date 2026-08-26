@@ -4,7 +4,7 @@
   "private": true,
   "description": "Sequential fresh-context agent orchestrator",
   "scripts": {
-    "test": "node test/engines.test.js && node test/prompts.test.js && node test/sandbox.test.js && node test/state.test.js && node test/ui.test.js"
+    "test": "node test/daemon.test.js && node test/engines.test.js && node test/prompts.test.js && node test/sandbox.test.js && node test/state.test.js && node test/ui.test.js"
   },
   "engines": {
     "node": ">=18"

@@ -3,8 +3,8 @@
 
 // Server port of the dashboard's stripPaths. The drive and UNC variants also
 // catch spaced segments ("C:\Program Files\...") the shared pattern cannot.
-const posixPathPattern = /(?<![\w:.\/\\])(?:[A-Za-z]:)?(?:[\/\\]|~[\/\\])[\w.@~-]+(?:[\/\\][\w.@ ~-]+)+[\/\\]?/g;
-const drivePathPattern = /[A-Za-z]:[\\\/](?:[^\\\/:*?"<>|\r\n]+[\\\/])+[\w.@~-]+[\\\/]?/g;
+const posixPathPattern = /(?<![\w:.\/\\])(?:[A-Za-z]:)?(?:[\/\\]|~[\/\\])[\w.@~-]+(?:[\/\\][\w.@ ~-]+)*[\/\\]?/g;
+const drivePathPattern = /[A-Za-z]:[\\\/](?:[^\\\/:*?"<>|\r\n]+[\\\/])*[\w.@~-]+[\\\/]?/g;
 const uncPathPattern = /\\\\[\w.$-]+(?:[\\\/][^\\\/:*?"<>|\r\n]+)*[\\\/][\w.@~-]+[\\\/]?/g;
 
 function lastSegment(value) {
@@ -144,7 +144,7 @@ function planView(loop) {
 
     if (finiteNumber(entry.task) !== null) {
       shaByTask.set(entry.task, entry.sha);
-    } else {
+    } else if (passSha === null) {
       passSha = entry.sha;
     }
   }
@@ -243,6 +243,22 @@ function publicRunning(task, activity, defaultEngine, now = Date.now()) {
   };
 }
 
+// done grows only on CONTINUE: the final item ends with PASS, which completes every position left.
+function completedTasks(task) {
+  const plan = planView(task);
+
+  if (plan) {
+    return plan.tasks.filter((entry) => entry.status === 'done').length;
+  }
+
+  const done = Array.isArray(task.done) ? task.done.length : 0;
+  const passed = (Array.isArray(task.cycles) ? task.cycles : [])
+    .some((cycle) => cycle && cycle.phase !== 'polish' && cycle.status === 'passed');
+
+  // Without a plan there is nothing to claim, so a bare pass stays uncounted.
+  return done && passed ? done + 1 : done;
+}
+
 function publicRecent(task, result, defaultEngine) {
   const merged = { ...task, ...(result && typeof result === 'object' ? result : {}) };
   const costUsd = finiteNumber(merged.costUsd) ?? (task.type === 'loop' ? sumCycleCosts(task.cycles) : null);
@@ -262,7 +278,7 @@ function publicRecent(task, result, defaultEngine) {
     return value;
   }
 
-  const tasksDone = Array.isArray(task.done) ? task.done.length : 0;
+  const tasksDone = completedTasks(task);
   const tasksBlocked = Array.isArray(task.blocked) ? task.blocked.length : 0;
 
   return {

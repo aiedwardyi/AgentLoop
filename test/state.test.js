@@ -13,6 +13,12 @@ test('absolute paths collapse to their last segment', () => {
   assert.equal(state.stripAbsPaths('copy \\\\server\\share\\file.txt'), 'copy file.txt');
 });
 
+test('single-segment absolute paths collapse too', () => {
+  assert.equal(state.stripAbsPaths('wrote /etc'), 'wrote etc');
+  assert.equal(state.stripAbsPaths('read C:\\boot.ini now'), 'read boot.ini now');
+  assert.equal(state.stripAbsPaths('/etc'), 'etc');
+});
+
 test('non-path text survives path stripping', () => {
   for (const text of [
     'http://127.0.0.1:5758/mcp?key=abc',
@@ -217,7 +223,7 @@ test('recent records whitelist fields and only claim task counts when they exist
     costUsd: 0.75,
     durationMs: 5000,
     finishedAt: '2026-07-28T11:30:00.000Z',
-    tasksDone: 2,
+    tasksDone: 3,
     tasksBlocked: 1,
     checkpoints: 2,
   });
@@ -241,6 +247,62 @@ test('recent records whitelist fields and only claim task counts when they exist
 
   assert.equal(task.costUsd, 0.12);
   assert.equal('checkpoints' in task, false);
+});
+
+test('recent loops count the plan item the pass completed', () => {
+  const walked = state.publicRecent(
+    {
+      id: 't-11',
+      type: 'loop',
+      project: 'demo',
+      planTasks: ['one', 'two', 'three'],
+      done: ['one', 'two'],
+      cycles: [
+        { n: 1, task: 1, status: 'continue' },
+        { n: 2, task: 2, status: 'continue' },
+        { n: 3, task: 3, status: 'passed', verdict: 'PASS' },
+      ],
+    },
+    { status: 'passed', summary: 'Passed.', durationMs: 10, finishedAt: 'x' },
+    'claude',
+  );
+
+  assert.equal(walked.tasksDone, 3);
+
+  const single = state.publicRecent(
+    {
+      id: 't-12',
+      type: 'loop',
+      project: 'demo',
+      planTasks: ['only item'],
+      cycles: [{ n: 1, task: 1, status: 'passed', verdict: 'PASS' }],
+    },
+    { status: 'passed', summary: 'Passed.', durationMs: 10, finishedAt: 'x' },
+    'claude',
+  );
+
+  assert.equal(single.tasksDone, 1);
+});
+
+test('a polish checkpoint does not displace the final-pass sha', () => {
+  const loop = state.publicRunning({
+    id: 't-13',
+    type: 'loop',
+    project: 'demo',
+    startedAt: '2026-07-28T11:00:00.000Z',
+    taskRetries: 3,
+    autoCommit: true,
+    planTasks: ['one', 'two'],
+    checkpointShas: [{ task: 1, sha: 'aaa1111' }, { sha: 'fff9999' }, { sha: 'ppp8888' }],
+    cycles: [
+      { n: 1, task: 1, status: 'continue' },
+      { n: 2, task: 2, status: 'passed', verdict: 'PASS' },
+      { n: 3, status: 'passed', verdict: 'SHIP', phase: 'polish' },
+    ],
+  }, undefined, 'claude', NOW);
+
+  assert.equal(loop.plan.tasks[1].checkpoint, 'fff9999');
+  assert.equal(loop.checkpoints, 3);
 });
 
 test('cycle cost sums fall back to worker cost and respect the since filter', () => {

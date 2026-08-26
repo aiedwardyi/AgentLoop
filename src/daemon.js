@@ -906,12 +906,14 @@ function startLoopCycle(loop) {
   // Plan position at cycle start: completed and blocked items each advanced one slot.
   const taskNumber = (Array.isArray(loop.done) ? loop.done.length : 0)
     + (Array.isArray(loop.blocked) ? loop.blocked.length : 0) + 1;
+  const gitAtStart = polishing || loop.noGit ? null : gitSnapshot(loop.projectPath);
   const cycle = {
     n: cycleNumber,
     ...(polishing ? {} : { task: taskNumber }),
     status: 'running',
     phase: polishing ? 'polish' : 'worker',
     startedAt,
+    ...(gitAtStart ? { gitAtStart } : {}),
     workerLogId: cycleLogId(loop.id, cycleNumber, 'worker'),
     criticLogId: cycleLogId(loop.id, cycleNumber, 'critic'),
   };
@@ -1026,11 +1028,12 @@ function finishLoopWorker(loop, cycleNumber, details) {
       return;
     }
 
-    // Workers rewrite STATE.md every cycle, so a clean tree means the worker did nothing.
+    // A clean tree is not proof of an idle worker: with autoCommit off, earlier cycles leave work
+    // uncommitted, and a worker that commits its own changes leaves the tree clean too.
     if (cycle.phase !== 'polish' && !current.noGit) {
-      const status = runGit(current.projectPath, ['status', '--porcelain', '--', '.']);
+      const idle = madeNoChanges(cycle.gitAtStart, gitSnapshot(current.projectPath));
 
-      if (status.ok && !status.output) {
+      if (idle) {
         registerFailedCycle(current, cycleNumber, {
           ...workerFields,
           status: 'failed',
@@ -1108,22 +1111,31 @@ function cycleCostUsd(cycle, criticCost) {
   return { costUsd: state.roundCost((worker || 0) + (critic || 0)) };
 }
 
+// The blocked entry names the plan position this cycle was working: done.length alone misses
+// earlier blocks, and nextItem still names the item that came before them.
+function blockedEntry(loop, cycle) {
+  const done = Array.isArray(loop.done) ? loop.done.length : 0;
+  const blocked = Array.isArray(loop.blocked) ? loop.blocked.length : 0;
+  const task = cycle && Number.isInteger(cycle.task) ? cycle.task : done + blocked + 1;
+  const title = (Array.isArray(loop.planTasks) ? loop.planTasks : [])[task - 1];
+
+  return {
+    task,
+    item: title || (typeof loop.nextItem === 'string' && loop.nextItem ? loop.nextItem : 'first PLAN.md item'),
+  };
+}
+
 // Shared by critic FAIL verdicts and no-progress cycles: counts the streak,
 // blocks the current task at the retry budget, and picks the end state at the cycle cap.
 function registerFailedCycle(current, cycleNumber, cycleFields, event) {
   const streak = Math.max(0, Number(current.failStreak) || 0) + 1;
   const blocking = streak >= loopRetries(current.taskRetries);
-  const done = Array.isArray(current.done) ? current.done : [];
-  const entry = blocking
-    ? {
-      task: done.length + 1,
-      item: typeof current.nextItem === 'string' && current.nextItem ? current.nextItem : 'first PLAN.md item',
-    }
-    : null;
+  const entry = blocking ? blockedEntry(current, currentCycle(current, cycleNumber)) : null;
   const loop = {
     ...current,
     failStreak: entry ? 0 : streak,
-    ...(entry ? { blocked: [...(Array.isArray(current.blocked) ? current.blocked : []), entry] } : {}),
+    // nextItem named the item worked before this block; a later block must not reuse it.
+    ...(entry ? { blocked: [...(Array.isArray(current.blocked) ? current.blocked : []), entry], nextItem: '' } : {}),
   };
   let updated = updateCycle(loop, cycleNumber, entry
     ? { ...cycleFields, status: 'blocked', summary: `Blocked task ${entry.task}: ${entry.item}` }
@@ -1221,7 +1233,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
 
     if (polishing) {
       if (verdict.verdict === 'SHIP') {
-        const shipped = updateCycle(current, cycleNumber, {
+        let shipped = updateCycle(current, cycleNumber, {
           status: 'passed',
           phase: 'polish',
           verdict: 'SHIP',
@@ -1230,6 +1242,8 @@ function finishLoopCritic(loop, cycleNumber, details) {
           durationMs,
           ...cycleCostUsd(cycle, details.costUsd),
         });
+        // Without this the shipped tree stays dirty and the next auto-checkpoint loop is refused.
+        shipped = recordCheckpoint(shipped, null, 'wip(loop): polish shipped');
         store.writeTask(shipped, 'running');
         recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'SHIP' });
         completeLoop(shipped, 'passed', `Shipped on cycle ${cycleNumber}.`);
@@ -1960,6 +1974,24 @@ function runGit(projectPath, args) {
   }
 }
 
+// A checkpoint commit and a worker's own commit both move HEAD, so progress is the pair
+// (HEAD, tree) changing - not the tree simply being dirty.
+function gitSnapshot(projectPath) {
+  const tree = runGit(projectPath, ['status', '--porcelain', '--', '.']);
+
+  if (!tree.ok) {
+    return null;
+  }
+
+  const head = runGit(projectPath, ['rev-parse', 'HEAD']);
+
+  return { head: head.ok ? head.output : '', tree: tree.output };
+}
+
+function madeNoChanges(before, after) {
+  return Boolean(before) && Boolean(after) && before.head === after.head && before.tree === after.tree;
+}
+
 function insideGitWorkTree(projectPath) {
   const result = runGit(projectPath, ['rev-parse', '--is-inside-work-tree']);
   return result.ok && result.output === 'true';
@@ -1973,7 +2005,7 @@ function checkpointCommit(loop, message) {
 
   const value = String(message).replace(/\s+/g, ' ').trim().slice(0, 72);
   const add = runGit(loop.projectPath, ['add', '-A', '.']);
-  const commit = add.ok ? runGit(loop.projectPath, ['commit', '-m', value]) : add;
+  const commit = add.ok ? runGit(loop.projectPath, ['commit', '-m', value, '--', '.']) : add;
 
   if (!commit.ok) {
     appendLoopLog(loop, `checkpoint failed: ${commit.output || 'git error'}`);
@@ -2115,7 +2147,6 @@ async function createLoop(req, res) {
     ...(gitPresent ? {} : { noGit: true }),
     ...(polish ? { polish: true } : {}),
     engine,
-    model: store.config.model,
     title: `loop: ${project}`,
     source: taskSource(body),
   });
@@ -2444,4 +2475,6 @@ if (require.main === module) {
 module.exports = {
   start,
   fillSlots,
+  blockedEntry,
+  madeNoChanges,
 };

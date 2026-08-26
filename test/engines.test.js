@@ -1,5 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const engines = require('../src/engines');
 
@@ -81,4 +84,32 @@ test('model resolution prefers the task override, then per-engine config, then l
 
 test('a configured engine path overrides PATH lookup', () => {
   assert.equal(engines.binary(claude, { claude: 'C:\\custom\\claude.exe' }), 'C:\\custom\\claude.exe');
+});
+
+test('per-engine config beats the legacy model key', () => {
+  assert.equal(engines.modelFor(claude, { model: 'gpt-5.6-terra', models: { claude: 'opus' } }), 'opus');
+});
+
+test('PATH lookup skips a directory that shares the command name', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-path-'));
+  const originalPath = process.env.PATH;
+  const originalExtensions = process.env.PATHEXT;
+
+  fs.mkdirSync(path.join(directory, process.platform === 'win32' ? 'faketool.EXE' : 'faketool'));
+  process.env.PATH = directory;
+  process.env.PATHEXT = '.EXE';
+
+  try {
+    assert.equal(engines.findOnPath('faketool'), null);
+  } finally {
+    process.env.PATH = originalPath;
+
+    if (originalExtensions === undefined) {
+      delete process.env.PATHEXT;
+    } else {
+      process.env.PATHEXT = originalExtensions;
+    }
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

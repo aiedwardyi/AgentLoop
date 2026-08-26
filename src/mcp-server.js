@@ -84,13 +84,25 @@ process.stdin.on('data', (chunk) => {
       continue;
     }
 
+    // send() runs outside handleMessage's guard: an unhandled rejection here kills the session.
     handleMessage(message).then((response) => {
       if (response) {
         send(response);
+      }
+    }).catch((error) => {
+      log(`dispatch failed: ${error.stack || error.message}`);
+
+      if (message && typeof message === 'object' && Object.hasOwn(message, 'id')) {
+        try {
+          send({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: 'Internal error.' } });
+        } catch (sendError) {
+          log(`send failed: ${sendError.message}`);
+        }
       }
     });
   }
 });
 process.stdin.on('end', () => process.exit(0));
+process.stdout.on('error', (error) => log(`stdout: ${error.message}`));
 process.on('uncaughtException', (error) => log(`uncaught: ${error.stack || error.message}`));
 log('started');
