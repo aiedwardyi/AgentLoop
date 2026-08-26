@@ -1277,8 +1277,9 @@ function finishLoopCritic(loop, cycleNumber, details) {
       });
 
       if (cycleNumber >= current.maxCycles) {
+        // Without this the validated tree stays dirty and the next auto-checkpoint loop is refused.
         completeLoop(
-          improved,
+          recordCheckpoint(improved, null, 'wip(loop): polish improved'),
           'passed',
           'The final improvement was not applied; the working tree may not match the last validated state.',
         );
@@ -1402,7 +1403,7 @@ function startLoop(loop) {
 
   // The enqueue gate approved a tree that can drift while the loop waits for a slot.
   // A loop queued before the snapshot existed has no baseline to compare, so it is left alone.
-  if (loop.gitAtQueue && !madeNoChanges(loop.gitAtQueue, gitSnapshot(loop.projectPath))) {
+  if (loop.gitAtQueue && !sameProjectTree(loop.gitAtQueue, gitSnapshot(loop.projectPath))) {
     completeLoop(runningLoop, 'failed', dirtyTreeError, 'dirty_project_tree');
     return;
   }
@@ -2017,8 +2018,15 @@ function dirtyDigest(projectPath) {
   return digest.digest('hex');
 }
 
-// A checkpoint commit and a worker's own commit both move HEAD, so progress is the triple
-// (HEAD, tree, content) changing - not the tree simply being dirty.
+// A project can be a subdirectory: a sibling project's commit moves repository HEAD without
+// touching these files, so the revision here is the last commit that did.
+function projectHead(projectPath) {
+  const head = runGit(projectPath, ['rev-list', '-1', 'HEAD', '--', '.']);
+  return head.ok ? head.output : '';
+}
+
+// A checkpoint commit and a worker's own commit both move the project revision, so progress is the
+// triple (revision, tree, content) changing - not the tree simply being dirty.
 function gitSnapshot(projectPath) {
   const tree = runGit(projectPath, ['status', '--porcelain', '--', '.']);
   const dirty = tree.ok ? dirtyDigest(projectPath) : null;
@@ -2027,14 +2035,16 @@ function gitSnapshot(projectPath) {
     return null;
   }
 
-  const head = runGit(projectPath, ['rev-parse', 'HEAD']);
+  return { head: projectHead(projectPath), tree: tree.output, dirty };
+}
 
-  return { head: head.ok ? head.output : '', tree: tree.output, dirty };
+// Cleanliness asks only whether the project's own files drifted, never where the revision sits.
+function sameProjectTree(before, after) {
+  return Boolean(before) && Boolean(after) && before.tree === after.tree && before.dirty === after.dirty;
 }
 
 function madeNoChanges(before, after) {
-  return Boolean(before) && Boolean(after)
-    && before.head === after.head && before.tree === after.tree && before.dirty === after.dirty;
+  return sameProjectTree(before, after) && before.head === after.head;
 }
 
 function insideGitWorkTree(projectPath) {
@@ -2057,11 +2067,10 @@ function checkpointCommit(loop, message, headAtStart) {
   const value = String(message).replace(/\s+/g, ' ').trim().slice(0, 72);
   const add = runGit(loop.projectPath, ['add', '-A', '.']);
   const commit = add.ok ? runGit(loop.projectPath, ['commit', '-m', value, '--', '.']) : add;
-  const head = runGit(loop.projectPath, ['rev-parse', 'HEAD']);
 
   if (!commit.ok) {
     const tree = runGit(loop.projectPath, ['status', '--porcelain', '--', '.']);
-    const adopted = head.ok && tree.ok ? workerCommitSha(headAtStart, head.output, tree.output) : null;
+    const adopted = tree.ok ? workerCommitSha(headAtStart, projectHead(loop.projectPath), tree.output) : null;
 
     if (!adopted) {
       appendLoopLog(loop, `checkpoint failed: ${commit.output || 'git error'}`);
@@ -2069,6 +2078,8 @@ function checkpointCommit(loop, message, headAtStart) {
 
     return adopted;
   }
+
+  const head = runGit(loop.projectPath, ['rev-parse', 'HEAD']);
 
   return head.ok && head.output ? head.output : null;
 }
@@ -2537,6 +2548,7 @@ module.exports = {
   blockedEntry,
   cycleTaskNumber,
   gitSnapshot,
+  sameProjectTree,
   madeNoChanges,
   workerCommitSha,
 };

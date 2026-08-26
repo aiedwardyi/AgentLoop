@@ -90,6 +90,72 @@ test('the tree snapshot sees content, not just status codes', (t) => {
   }
 });
 
+test('a sibling project commit never blocks a queued loop', (t) => {
+  const repo = tempRepo();
+
+  if (!repo) {
+    t.skip('git unavailable');
+    return;
+  }
+
+  try {
+    const project = path.join(repo.dir, 'project');
+    const sibling = path.join(repo.dir, 'sibling');
+
+    fs.mkdirSync(project);
+    fs.mkdirSync(sibling);
+    fs.writeFileSync(path.join(project, 'app.js'), 'one\n');
+    fs.writeFileSync(path.join(sibling, 'app.js'), 'one\n');
+    repo.git('add', '-A', '.');
+    repo.git('commit', '-qm', 'seed');
+
+    const queued = daemon.gitSnapshot(project);
+
+    fs.writeFileSync(path.join(sibling, 'app.js'), 'two\n');
+    repo.git('add', '-A', '.');
+    repo.git('commit', '-qm', 'sibling checkpoint');
+
+    const atStart = daemon.gitSnapshot(project);
+
+    assert.equal(queued.head, atStart.head);
+    assert.equal(daemon.sameProjectTree(queued, atStart), true);
+    assert.equal(daemon.madeNoChanges(queued, atStart), true);
+  } finally {
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test('a commit inside the project advances its revision', (t) => {
+  const repo = tempRepo();
+
+  if (!repo) {
+    t.skip('git unavailable');
+    return;
+  }
+
+  try {
+    const project = path.join(repo.dir, 'project');
+
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, 'app.js'), 'one\n');
+    repo.git('add', '-A', '.');
+    repo.git('commit', '-qm', 'seed');
+
+    const before = daemon.gitSnapshot(project);
+
+    fs.writeFileSync(path.join(project, 'app.js'), 'two\n');
+    repo.git('add', '-A', '.');
+    repo.git('commit', '-qm', 'worker commit');
+
+    const after = daemon.gitSnapshot(project);
+
+    assert.notEqual(before.head, after.head);
+    assert.equal(daemon.madeNoChanges(before, after), false);
+  } finally {
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
 test('a worker commit becomes the checkpoint sha only over a clean tree', () => {
   assert.equal(daemon.workerCommitSha('aaa', 'bbb', ''), 'bbb');
   assert.equal(daemon.workerCommitSha('aaa', 'aaa', ''), null);
@@ -103,9 +169,24 @@ test('a continued checkpoint carries the cycle task, not the done count', () => 
   assert.equal(daemon.cycleTaskNumber(null, 2), 2);
 });
 
+test('a checkpoint only adopts a commit that touched the project', () => {
+  assert.match(daemonSource, /'rev-list', '-1', 'HEAD', '--', '\.'/);
+  assert.match(daemonSource, /workerCommitSha\(headAtStart, projectHead\(loop\.projectPath\), tree\.output\)/);
+});
+
 test('a queued loop revalidates its tree before the first checkpoint', () => {
-  assert.match(daemonSource, /madeNoChanges\(loop\.gitAtQueue, gitSnapshot\(loop\.projectPath\)\)/);
+  assert.match(daemonSource, /sameProjectTree\(loop\.gitAtQueue, gitSnapshot\(loop\.projectPath\)\)/);
   assert.match(daemonSource, /'dirty_project_tree'/);
+});
+
+test('the start gate reads the tree, not the revision', () => {
+  const queued = { head: 'aaa', tree: '', dirty: 'empty' };
+
+  assert.equal(daemon.sameProjectTree(queued, { head: 'bbb', tree: '', dirty: 'empty' }), true);
+  assert.equal(daemon.sameProjectTree(queued, { head: 'aaa', tree: ' M src/app.js', dirty: 'empty' }), false);
+  assert.equal(daemon.sameProjectTree(queued, { head: 'aaa', tree: '', dirty: 'other' }), false);
+  assert.equal(daemon.sameProjectTree(queued, null), false);
+  assert.equal(daemon.sameProjectTree(null, queued), false);
 });
 
 test('a missing git snapshot never counts as no progress', () => {
@@ -116,6 +197,11 @@ test('a missing git snapshot never counts as no progress', () => {
 
 test('checkpoint commits are restricted to the project path', () => {
   assert.match(daemonSource, /'commit', '-m', value, '--', '\.'/);
+});
+
+test('both polish endings checkpoint the validated tree', () => {
+  assert.match(daemonSource, /recordCheckpoint\(shipped, null, 'wip\(loop\): polish shipped'\)/);
+  assert.match(daemonSource, /recordCheckpoint\(improved, null, 'wip\(loop\): polish improved'\)/);
 });
 
 test('a legacy config model is never stamped onto a new loop', () => {
