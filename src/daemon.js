@@ -1007,52 +1007,41 @@ function finishLoopWorker(loop, cycleNumber, details) {
 
     if (reason) {
       const passed = hasPassedCycle(current);
-      const failed = updateCycle(current, cycleNumber, {
+      if (passed) {
+        const failed = updateCycle(current, cycleNumber, {
+          ...workerFields,
+          status: 'failed',
+          phase: cyclePhase(cycle, 'worker'),
+          summary: workerFields.workerSummary,
+          finishedAt,
+          durationMs,
+          reason,
+        });
+        store.writeTask(failed, 'running');
+        recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'failed', reason });
+        completeLoop(
+          failed,
+          'passed',
+          incompletePolishWorker
+            ? incompletePolishSummary()
+            : `Passed before polish cycle ${cycleNumber} worker could finish.`,
+        );
+        return;
+      }
+
+      registerFailedCycle(current, cycleNumber, {
         ...workerFields,
         status: 'failed',
-        phase: cyclePhase(cycle, 'worker'),
+        phase: 'worker',
         summary: workerFields.workerSummary,
         finishedAt,
         durationMs,
         reason,
+      }, {
+        type: 'worker_finished',
+        data: { id: loop.id, cycle: cycleNumber, status: 'failed', reason },
       });
-      store.writeTask(failed, 'running');
-      recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'failed', reason });
-      completeLoop(
-        failed,
-        passed ? 'passed' : 'failed',
-        passed && incompletePolishWorker
-          ? incompletePolishSummary()
-          : passed
-            ? `Passed before polish cycle ${cycleNumber} worker could finish.`
-            : `Cycle ${cycleNumber} worker failed.`,
-        passed ? undefined : reason,
-      );
       return;
-    }
-
-    // A clean tree is not proof of an idle worker: with autoCommit off, earlier cycles leave work
-    // uncommitted, and a worker that commits its own changes leaves the tree clean too.
-    if (cycle.phase !== 'polish' && !current.noGit) {
-      const idle = madeNoChanges(cycle.gitAtStart, gitSnapshot(current.projectPath));
-
-      if (idle) {
-        registerFailedCycle(current, cycleNumber, {
-          ...workerFields,
-          status: 'failed',
-          phase: 'worker',
-          verdict: 'FAIL',
-          fixes: 'The last cycle changed no files. Make real progress on the next incomplete PLAN.md item.',
-          summary: `Cycle ${cycleNumber} worker made no changes.`,
-          finishedAt,
-          durationMs,
-          reason: 'worker made no changes',
-        }, {
-          type: 'worker_finished',
-          data: { id: loop.id, cycle: cycleNumber, status: 'failed', reason: 'worker made no changes' },
-        });
-        return;
-      }
     }
 
     const awaitingCritic = updateCycle(current, cycleNumber, {
@@ -1081,20 +1070,37 @@ function finishLoopWorker(loop, cycleNumber, details) {
       );
     } catch (error) {
       const passed = hasPassedCycle(awaitingCritic);
-      const invalid = updateCycle(awaitingCritic, cycleNumber, {
+      if (passed) {
+        const invalid = updateCycle(awaitingCritic, cycleNumber, {
+          status: 'critic_invalid',
+          phase: cyclePhase(cycle, 'critic'),
+          summary: 'Critic failed to start.',
+          finishedAt,
+          durationMs,
+          reason: 'critic_start_failed',
+        });
+        completeLoop(
+          invalid,
+          'passed',
+          `Passed before polish cycle ${cycleNumber} critic could start.`,
+        );
+        console.error(`Failed to start critic for ${loop.id}: ${error.message}`);
+        return;
+      }
+
+      registerFailedCycle(awaitingCritic, cycleNumber, {
         status: 'critic_invalid',
-        phase: cyclePhase(cycle, 'critic'),
+        phase: 'critic',
+        verdict: 'FAIL',
+        fixes: 'Critic failed to start. Re-check the current PLAN.md item.',
         summary: 'Critic failed to start.',
         finishedAt,
         durationMs,
         reason: 'critic_start_failed',
+      }, {
+        type: 'critic_invalid',
+        data: { id: loop.id, cycle: cycleNumber, reason: 'critic_start_failed' },
       });
-      completeLoop(
-        invalid,
-        passed ? 'passed' : 'failed',
-        passed ? `Passed before polish cycle ${cycleNumber} critic could start.` : `Cycle ${cycleNumber} critic was invalid.`,
-        passed ? undefined : 'critic_start_failed',
-      );
       console.error(`Failed to start critic for ${loop.id}: ${error.message}`);
     }
   } catch (error) {
@@ -1215,27 +1221,42 @@ function finishLoopCritic(loop, cycleNumber, details) {
 
     if (reason) {
       const passed = hasPassedCycle(current);
-      const invalid = updateCycle(current, cycleNumber, {
+      if (passed) {
+        const invalid = updateCycle(current, cycleNumber, {
+          status: 'critic_invalid',
+          phase: cyclePhase(cycle, 'critic'),
+          summary: 'Critic did not produce a valid verdict.',
+          finishedAt,
+          durationMs,
+          reason,
+          ...cycleCostUsd(cycle, details.costUsd),
+        });
+        store.writeTask(invalid, 'running');
+        recordEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
+        completeLoop(
+          invalid,
+          'passed',
+          incompletePolishCritic
+            ? incompletePolishSummary()
+            : `Passed before polish cycle ${cycleNumber} received a valid verdict.`,
+        );
+        return;
+      }
+
+      registerFailedCycle(current, cycleNumber, {
         status: 'critic_invalid',
-        phase: cyclePhase(cycle, 'critic'),
+        phase: 'critic',
+        verdict: 'FAIL',
+        fixes: 'Critic did not produce a valid verdict. Re-check the current PLAN.md item.',
         summary: 'Critic did not produce a valid verdict.',
         finishedAt,
         durationMs,
         reason,
         ...cycleCostUsd(cycle, details.costUsd),
+      }, {
+        type: 'critic_invalid',
+        data: { id: loop.id, cycle: cycleNumber, reason },
       });
-      store.writeTask(invalid, 'running');
-      recordEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
-      completeLoop(
-        invalid,
-        passed ? 'passed' : 'failed',
-        passed && incompletePolishCritic
-          ? incompletePolishSummary()
-          : passed
-            ? `Passed before polish cycle ${cycleNumber} received a valid verdict.`
-            : `Cycle ${cycleNumber} critic was invalid.`,
-        passed ? undefined : reason,
-      );
       return;
     }
 
