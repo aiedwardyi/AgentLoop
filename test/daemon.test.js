@@ -544,6 +544,72 @@ test('finishLoopCritic fails the cycle, leaves verdict FAIL, and does not latch 
   }
 });
 
+test('finishLoopCritic fails the cycle, leaves verdict FAIL, and does not complete the loop when polish SHIP checkpoint fails', () => {
+  store.ensureDirs();
+  const repo = tempRepo();
+  assert.ok(repo);
+  const loopId = 'test-polish-ship-checkpoint-fail-loop';
+  try {
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'clean\n');
+    repo.git('add', 'test.txt');
+    repo.git('commit', '-m', 'clean');
+    const head = repo.git('rev-parse', 'HEAD').stdout.trim();
+
+    const loop = {
+      id: loopId,
+      type: 'loop',
+      status: 'running',
+      autoCommit: true,
+      polish: true,
+      projectPath: repo.dir,
+      planTasks: ['task one'],
+      maxCycles: 3,
+      taskRetries: 3,
+      failStreak: 0,
+      cycles: [
+        {
+          n: 1,
+          status: 'passed',
+          phase: 'critic',
+          verdict: 'PASS',
+        },
+        {
+          n: 2,
+          status: 'running',
+          phase: 'polish',
+          gitAtStart: { head },
+        },
+      ],
+    };
+
+    store.writeTask(loop, 'running');
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'modified\n');
+    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
+
+    daemon.finishLoopCritic(loop, 2, {
+      exitCode: 0,
+      resultText: 'VERDICT: SHIP',
+    });
+
+    const updated = store.readTask(loopId, 'running');
+    assert.ok(updated);
+    assert.equal(updated.failStreak, 1);
+    assert.equal(updated.status, 'running');
+    assert.notEqual(updated.reason, 'cycle_transition_failed');
+    const c2 = updated.cycles[1];
+    assert.equal(c2.status, 'failed');
+    assert.equal(c2.verdict, 'FAIL');
+    assert.notEqual(c2.verdict, 'SHIP');
+    assert.notEqual(c2.reason, 'cycle_transition_failed');
+    assert.match(c2.reason, /index\.lock|checkpoint failed/i);
+  } finally {
+    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
+    try { fs.unlinkSync(path.join(store.paths.done, `${loopId}.json`)); } catch {}
+  }
+});
+
 test('registerFailedCycle records checkpoint error into cycle checkpointError and emits checkpoint_failed event when blocked checkpoint fails', () => {
   store.ensureDirs();
   const repo = tempRepo();

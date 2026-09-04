@@ -42,6 +42,14 @@ let ticker;
 let stopping = false;
 let bridgeChild;
 
+class GitCheckpointError extends Error {
+  constructor(message, stderr) {
+    super(message);
+    this.name = 'GitCheckpointError';
+    this.stderr = stderr;
+  }
+}
+
 function taskTime(task, field) {
   const value = Date.parse(task[field]);
   return Number.isFinite(value) ? value : 0;
@@ -1294,14 +1302,35 @@ function finishLoopCritic(loop, cycleNumber, details) {
           ...cycleCostUsd(cycle, details.costUsd),
         });
         // Without this the shipped tree stays dirty and the next auto-checkpoint loop is refused.
-        shipped = recordCheckpoint(shipped, null, 'wip(loop): polish shipped');
+        try {
+          shipped = recordCheckpoint(shipped, null, 'wip(loop): polish shipped');
+        } catch (error) {
+          if (error instanceof GitCheckpointError) {
+            registerFailedCycle(current, cycleNumber, {
+              status: 'failed',
+              phase: 'polish',
+              verdict: 'FAIL',
+              fixes: `Checkpoint failed: ${error.stderr}`,
+              summary: `Checkpoint failed: ${error.stderr}`,
+              finishedAt,
+              durationMs,
+              reason: error.stderr,
+              ...cycleCostUsd(cycle, details.costUsd),
+            }, {
+              type: 'critic_verdict',
+              data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: `Checkpoint failed: ${error.stderr}`, reason: error.stderr },
+            });
+            return;
+          }
+          throw error;
+        }
         store.writeTask(shipped, 'running');
         recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'SHIP' });
         completeLoop(shipped, 'passed', `Shipped on cycle ${cycleNumber}.`);
         return;
       }
 
-      const improved = updateCycle(current, cycleNumber, {
+      let improved = updateCycle(current, cycleNumber, {
         status: 'improve',
         phase: 'polish',
         verdict: 'IMPROVE',
@@ -1321,8 +1350,30 @@ function finishLoopCritic(loop, cycleNumber, details) {
 
       if (cycleNumber >= current.maxCycles) {
         // Without this the validated tree stays dirty and the next auto-checkpoint loop is refused.
+        try {
+          improved = recordCheckpoint(improved, null, 'wip(loop): polish improved');
+        } catch (error) {
+          if (error instanceof GitCheckpointError) {
+            registerFailedCycle(current, cycleNumber, {
+              status: 'failed',
+              phase: 'polish',
+              verdict: 'FAIL',
+              fixes: `Checkpoint failed: ${error.stderr}`,
+              summary: `Checkpoint failed: ${error.stderr}`,
+              finishedAt,
+              durationMs,
+              reason: error.stderr,
+              ...cycleCostUsd(cycle, details.costUsd),
+            }, {
+              type: 'critic_verdict',
+              data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: `Checkpoint failed: ${error.stderr}`, reason: error.stderr },
+            });
+            return;
+          }
+          throw error;
+        }
         completeLoop(
-          recordCheckpoint(improved, null, 'wip(loop): polish improved'),
+          improved,
           'passed',
           'The final improvement was not applied; the working tree may not match the last validated state.',
         );
@@ -2150,14 +2201,6 @@ function insideGitWorkTree(projectPath) {
 // checkpoint. HEAD advancing over a clean tree is what separates that from a real git failure.
 function workerCommitSha(headAtStart, head, tree) {
   return headAtStart && head && head !== headAtStart && tree === '' ? head : null;
-}
-
-class GitCheckpointError extends Error {
-  constructor(message, stderr) {
-    super(message);
-    this.name = 'GitCheckpointError';
-    this.stderr = stderr;
-  }
 }
 
 // Checkpoint messages are daemon-authored from verdict text alone; agents never run git.
