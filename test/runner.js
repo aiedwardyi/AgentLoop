@@ -240,6 +240,10 @@ async function startDaemon(overridePort) {
 
   fs.writeFileSync(tempConfigPath, `${JSON.stringify(testConfig, null, 2)}\n`, 'utf8');
 
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(MOCK_JS, 0o755); } catch { /* best-effort */ }
+  }
+
   const child = spawn(process.execPath, [
     path.join(REPO_ROOT, 'src', 'daemon.js'),
     '--config',
@@ -267,19 +271,26 @@ async function startDaemon(overridePort) {
 }
 
 function stopDaemon(child) {
-  if (child && child.tempDir) {
-    rmrf(child.tempDir);
-  }
-  if (!child || !child.pid) {
-    return;
-  }
-  try { child.kill('SIGTERM'); } catch { /* exited */ }
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline && daemonAlive(child.pid)) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
-  if (daemonAlive(child.pid)) {
-    try { child.kill('SIGKILL'); } catch { /* exited */ }
+  try {
+    if (!child || !child.pid) {
+      return;
+    }
+    try { child.kill('SIGTERM'); } catch { /* exited */ }
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline && daemonAlive(child.pid)) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+    if (daemonAlive(child.pid)) {
+      try { child.kill('SIGKILL'); } catch { /* exited */ }
+      const killDeadline = Date.now() + 1000;
+      while (Date.now() < killDeadline && daemonAlive(child.pid)) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+    }
+  } finally {
+    if (child && child.tempDir) {
+      rmrf(child.tempDir);
+    }
   }
 }
 

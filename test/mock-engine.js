@@ -143,12 +143,12 @@ function formatWorkerMessage(step, work) {
   const result = (step && step.loopResult) || {};
   const status = result.status === 'failed' || result.status === 'fail' ? 'failed' : 'done';
   const summary = typeof result.summary === 'string' ? result.summary : work.summary;
-  const safe = summary.replace(/\\/g, '\\\\').replace(/"/g, '\\\"');
+  const payload = JSON.stringify({ status, summary });
 
   return [
     'Mock worker finished.',
     summary,
-    `LOOP_RESULT {"status":"${status}","summary":"${safe}"}`,
+    `LOOP_RESULT ${payload}`,
   ].join('\n');
 }
 
