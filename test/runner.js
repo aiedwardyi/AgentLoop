@@ -1,5 +1,6 @@
 // Harness runner: boots the daemon, executes loop scenarios, and asserts results.
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const net = require('node:net');
@@ -20,7 +21,6 @@ const TERMINAL_STATUSES = new Set([
 ]);
 
 let currentPort = Number(process.env.AGENTLOOP_HARNESS_PORT || 0);
-let originalConfigContent = null;
 
 function activePort() {
   return currentPort || DEFAULT_PORT;
@@ -218,34 +218,15 @@ async function waitForLoop(id, timeoutMs = 45000, port = currentPort) {
   return { done: false, state: last, foundRecent: null, elapsedMs: Date.now() - started };
 }
 
-function restoreConfig() {
-  if (originalConfigContent !== null) {
-    const configPath = path.join(REPO_ROOT, 'config.json');
-    try {
-      fs.writeFileSync(configPath, originalConfigContent, 'utf8');
-    } catch {
-      // best-effort restore
-    }
-  }
-}
-
-process.on('exit', restoreConfig);
-process.on('SIGINT', () => {
-  restoreConfig();
-  process.exit(130);
-});
-
 async function startDaemon(overridePort) {
-  const configPath = path.join(REPO_ROOT, 'config.json');
-  if (originalConfigContent === null) {
-    originalConfigContent = fs.readFileSync(configPath, 'utf8');
-  }
-
   const port = overridePort || (process.env.AGENTLOOP_HARNESS_PORT
     ? Number(process.env.AGENTLOOP_HARNESS_PORT)
     : await getAvailablePort());
   const bridgePort = await getAvailablePort();
   currentPort = port;
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-harness-'));
+  const tempConfigPath = path.join(tempDir, 'config.json');
 
   const testConfig = {
     dashboardPort: port,
@@ -257,31 +238,38 @@ async function startDaemon(overridePort) {
     enginePaths: { codex: MOCK_EXECUTABLE },
   };
 
-  fs.writeFileSync(configPath, `${JSON.stringify(testConfig, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(tempConfigPath, `${JSON.stringify(testConfig, null, 2)}\n`, 'utf8');
 
-  const child = spawn(process.execPath, [path.join(REPO_ROOT, 'src', 'daemon.js')], {
+  const child = spawn(process.execPath, [
+    path.join(REPO_ROOT, 'src', 'daemon.js'),
+    '--config',
+    tempConfigPath,
+  ], {
     cwd: REPO_ROOT,
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      AGENTLOOP_CONFIG_PATH: tempConfigPath,
+    },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
 
   child.port = port;
+  child.tempDir = tempDir;
 
   try {
     await waitForReady(child, port);
   } catch (error) {
     stopDaemon(child);
     throw error;
-  } finally {
-    // Config loaded into daemon memory; restore disk copy so repo stays clean.
-    restoreConfig();
   }
 
   return child;
 }
 
 function stopDaemon(child) {
-  restoreConfig();
+  if (child && child.tempDir) {
+    rmrf(child.tempDir);
+  }
   if (!child || !child.pid) {
     return;
   }
@@ -336,7 +324,8 @@ function collectActual(id, projectDir, mockState, waited, child) {
 
 async function runScenario(scenarioName, child) {
   const scenarioFile = path.join(SCENARIOS_DIR, `${scenarioName}.json`);
-  const scenario = JSON.parse(fs.readFileSync(scenarioFile, 'utf8'));
+  const scenarioRaw = fs.readFileSync(scenarioFile, 'utf8');
+  const scenario = JSON.parse(scenarioRaw.replace(/^\s*\/\/.*$/gm, ''));
   const name = scenario.name || scenarioName;
   const mockState = path.join(WORKSPACE, 'mock-state', name);
   rmrf(mockState);

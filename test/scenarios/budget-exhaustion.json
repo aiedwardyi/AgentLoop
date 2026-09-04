@@ -1,4 +1,5 @@
 {
+  "_comment": "Encodes currently-known bug: loop resolves to maxed instead of incomplete when cycles run out.",
   "name": "budget-exhaustion",
   "plan": [
     "Create add.js"

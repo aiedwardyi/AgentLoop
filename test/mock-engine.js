@@ -218,6 +218,7 @@ const engine = scenario.engine && typeof scenario.engine === 'object' ? scenario
 const stateDir = resolveStateDir(scenarioFile);
 fs.mkdirSync(stateDir, { recursive: true });
 
+// Role detection couples to the critic prompt wording in src/prompts.js; changing that wording silently makes the mock grade as a worker.
 const isCritic = /strict project critic/i.test(prompt);
 const role = isCritic ? 'critic' : 'worker';
 const invocation = {

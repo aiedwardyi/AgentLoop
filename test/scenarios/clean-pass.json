@@ -1,4 +1,5 @@
 {
+  "_comment": "Encodes currently-known bug: A4 final-pass labeling (wip(loop): final pass).",
   "name": "clean-pass",
   "plan": [
     "Create add.js"
