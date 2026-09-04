@@ -1,0 +1,57 @@
+{
+  "name": "plan-walk",
+  "plan": [
+    "Create add.js",
+    "Create sub.js",
+    "Create mul.js"
+  ],
+  "maxCycles": 5,
+  "taskRetries": 3,
+  "autoCommit": true,
+  "engine": {
+    "worker": [
+      {
+        "write": "add.js",
+        "loopResult": {
+          "status": "done",
+          "summary": "did add"
+        }
+      },
+      {
+        "write": "sub.js",
+        "loopResult": {
+          "status": "done",
+          "summary": "did sub"
+        }
+      },
+      {
+        "write": "mul.js",
+        "loopResult": {
+          "status": "done",
+          "summary": "did mul"
+        }
+      }
+    ],
+    "critic": [
+      "CONTINUE - done: Create add.js; next: Create sub.js",
+      "CONTINUE - done: Create sub.js; next: Create mul.js",
+      "PASS"
+    ]
+  },
+  "expect": {
+    "status": "passed",
+    "checkpoints": 3,
+    "verdicts": [
+      "CONTINUE",
+      "CONTINUE",
+      "PASS"
+    ],
+    "tasksDone": 3,
+    "daemonAlive": true,
+    "gitMessages": [
+      "wip(loop): task 1 - Create add.js",
+      "wip(loop): task 2 - Create sub.js",
+      "wip(loop): final pass"
+    ]
+  }
+}
