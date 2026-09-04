@@ -65,3 +65,30 @@ test('scenario: budget exhaustion marks loop maxed', async () => {
   assert.deepEqual(actual.verdicts, expect.verdicts);
   assert.equal(actual.daemonAlive, true);
 });
+
+// Invalid critic verdict retries on task budget then passes on cycle 2.
+test('scenario: invalid critic verdict retries on task budget then passes', async () => {
+  const { actual, expect } = await runScenario('invalid-critic', daemon);
+  assert.equal(actual.status, expect.status);
+  assert.equal(actual.checkpoints, expect.checkpoints);
+  assert.equal(actual.tasksDone, expect.tasksDone);
+  assert.deepEqual(actual.verdicts, expect.verdicts);
+  assert.equal(actual.daemonAlive, true);
+  for (const snippet of expect.gitMessages || []) {
+    assert.ok(actual.gitLog.includes(snippet), `git log missing ${snippet}`);
+  }
+});
+
+// No-change worker is graded by critic and passes.
+test('scenario: no-change worker is graded by critic and passes', async () => {
+  const { actual, expect } = await runScenario('no-change-worker', daemon);
+  assert.equal(actual.status, expect.status);
+  assert.equal(actual.checkpoints, expect.checkpoints);
+  assert.equal(actual.tasksDone, expect.tasksDone);
+  assert.deepEqual(actual.verdicts, expect.verdicts);
+  assert.equal(actual.daemonAlive, true);
+  for (const snippet of expect.gitMessages || []) {
+    assert.ok(actual.gitLog.includes(snippet), `git log missing ${snippet}`);
+  }
+});
+

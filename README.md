@@ -188,6 +188,8 @@ node src/daemon.js
 
 On every platform, install and authenticate at least one engine CLI first. The daemon and bridge bind to loopback addresses, so a tunnel is required for a hosted connector.
 
+On Windows, pressing Ctrl-C in the console gracefully finalizes running loops because it raises SIGINT. Scripted process termination (`process.kill` with SIGTERM) on Windows terminates immediately without running shutdown handlers; if terminated this way, restart recovery finalizes interrupted tasks on the next startup.
+
 ## Roadmap
 
 - **Research loops.** Cycles that gather sources first, then write against an explicit rubric - reports, docs, briefs.

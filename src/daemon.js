@@ -31,6 +31,8 @@ const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', '
 const dirtyTreeError = 'Auto-checkpoint needs a clean project tree: commit or stash your changes first.';
 const defaultLoopCycles = 3;
 const defaultTaskRetries = 3;
+const shutdownGracePeriodMs = 10000;
+const shutdownDeadlineMarginMs = 2000;
 const runningActivity = new Map();
 const activeWorkers = new Map();
 
@@ -39,6 +41,14 @@ let server;
 let ticker;
 let stopping = false;
 let bridgeChild;
+
+class GitCheckpointError extends Error {
+  constructor(message, stderr) {
+    super(message);
+    this.name = 'GitCheckpointError';
+    this.stderr = stderr;
+  }
+}
 
 function taskTime(task, field) {
   const value = Date.parse(task[field]);
@@ -953,6 +963,10 @@ function startLoopCycle(loop) {
 }
 
 function finishLoopWorker(loop, cycleNumber, details) {
+  if (stopping) {
+    return;
+  }
+
   const current = readRunningLoop(loop.id);
 
   if (!current) {
@@ -1007,52 +1021,43 @@ function finishLoopWorker(loop, cycleNumber, details) {
 
     if (reason) {
       const passed = hasPassedCycle(current);
-      const failed = updateCycle(current, cycleNumber, {
+      if (passed) {
+        const failed = updateCycle(current, cycleNumber, {
+          ...workerFields,
+          status: 'failed',
+          phase: cyclePhase(cycle, 'worker'),
+          summary: workerFields.workerSummary,
+          finishedAt,
+          durationMs,
+          reason,
+        });
+        store.writeTask(failed, 'running');
+        recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'failed', reason });
+        completeLoop(
+          failed,
+          'passed',
+          incompletePolishWorker
+            ? incompletePolishSummary()
+            : `Passed before polish cycle ${cycleNumber} worker could finish.`,
+        );
+        return;
+      }
+
+      registerFailedCycle(current, cycleNumber, {
         ...workerFields,
         status: 'failed',
-        phase: cyclePhase(cycle, 'worker'),
+        phase: 'worker',
+        verdict: 'FAIL',
+        fixes: workerFields.workerSummary || `Worker failed (${reason}).`,
         summary: workerFields.workerSummary,
         finishedAt,
         durationMs,
         reason,
+      }, {
+        type: 'worker_finished',
+        data: { id: loop.id, cycle: cycleNumber, status: 'failed', reason },
       });
-      store.writeTask(failed, 'running');
-      recordEvent('worker_finished', { id: loop.id, cycle: cycleNumber, status: 'failed', reason });
-      completeLoop(
-        failed,
-        passed ? 'passed' : 'failed',
-        passed && incompletePolishWorker
-          ? incompletePolishSummary()
-          : passed
-            ? `Passed before polish cycle ${cycleNumber} worker could finish.`
-            : `Cycle ${cycleNumber} worker failed.`,
-        passed ? undefined : reason,
-      );
       return;
-    }
-
-    // A clean tree is not proof of an idle worker: with autoCommit off, earlier cycles leave work
-    // uncommitted, and a worker that commits its own changes leaves the tree clean too.
-    if (cycle.phase !== 'polish' && !current.noGit) {
-      const idle = madeNoChanges(cycle.gitAtStart, gitSnapshot(current.projectPath));
-
-      if (idle) {
-        registerFailedCycle(current, cycleNumber, {
-          ...workerFields,
-          status: 'failed',
-          phase: 'worker',
-          verdict: 'FAIL',
-          fixes: 'The last cycle changed no files. Make real progress on the next incomplete PLAN.md item.',
-          summary: `Cycle ${cycleNumber} worker made no changes.`,
-          finishedAt,
-          durationMs,
-          reason: 'worker made no changes',
-        }, {
-          type: 'worker_finished',
-          data: { id: loop.id, cycle: cycleNumber, status: 'failed', reason: 'worker made no changes' },
-        });
-        return;
-      }
     }
 
     const awaitingCritic = updateCycle(current, cycleNumber, {
@@ -1081,20 +1086,36 @@ function finishLoopWorker(loop, cycleNumber, details) {
       );
     } catch (error) {
       const passed = hasPassedCycle(awaitingCritic);
-      const invalid = updateCycle(awaitingCritic, cycleNumber, {
+      if (passed) {
+        const invalid = updateCycle(awaitingCritic, cycleNumber, {
+          status: 'critic_invalid',
+          phase: cyclePhase(cycle, 'critic'),
+          summary: 'Critic failed to start.',
+          finishedAt,
+          durationMs,
+          reason: 'critic_start_failed',
+        });
+        completeLoop(
+          invalid,
+          'passed',
+          `Passed before polish cycle ${cycleNumber} critic could start.`,
+        );
+        return;
+      }
+
+      registerFailedCycle(awaitingCritic, cycleNumber, {
         status: 'critic_invalid',
-        phase: cyclePhase(cycle, 'critic'),
+        phase: 'critic',
+        verdict: 'FAIL',
+        fixes: 'Critic failed to start.',
         summary: 'Critic failed to start.',
         finishedAt,
         durationMs,
         reason: 'critic_start_failed',
+      }, {
+        type: 'critic_invalid',
+        data: { id: loop.id, cycle: cycleNumber, reason: 'critic_start_failed' },
       });
-      completeLoop(
-        invalid,
-        passed ? 'passed' : 'failed',
-        passed ? `Passed before polish cycle ${cycleNumber} critic could start.` : `Cycle ${cycleNumber} critic was invalid.`,
-        passed ? undefined : 'critic_start_failed',
-      );
       console.error(`Failed to start critic for ${loop.id}: ${error.message}`);
     }
   } catch (error) {
@@ -1150,7 +1171,18 @@ function registerFailedCycle(current, cycleNumber, cycleFields, event) {
     : cycleFields);
 
   if (entry) {
-    updated = recordCheckpoint(updated, cycleNumber, `wip(loop): task ${entry.task} blocked - ${entry.item}`);
+    try {
+      updated = recordCheckpoint(updated, cycleNumber, `wip(loop): task ${entry.task} blocked - ${entry.item}`);
+    } catch (error) {
+      if (error instanceof GitCheckpointError) {
+        updated = updateCycle(updated, cycleNumber, {
+          checkpointError: error.stderr,
+        });
+        recordEvent('checkpoint_failed', { id: current.id, cycle: cycleNumber, task: entry.task, error: error.stderr });
+      } else {
+        throw error;
+      }
+    }
   }
 
   store.writeTask(updated, 'running');
@@ -1171,6 +1203,10 @@ function registerFailedCycle(current, cycleNumber, cycleFields, event) {
 }
 
 function finishLoopCritic(loop, cycleNumber, details) {
+  if (stopping) {
+    return;
+  }
+
   const current = readRunningLoop(loop.id);
 
   if (!current) {
@@ -1215,27 +1251,42 @@ function finishLoopCritic(loop, cycleNumber, details) {
 
     if (reason) {
       const passed = hasPassedCycle(current);
-      const invalid = updateCycle(current, cycleNumber, {
+      if (passed) {
+        const invalid = updateCycle(current, cycleNumber, {
+          status: 'critic_invalid',
+          phase: cyclePhase(cycle, 'critic'),
+          summary: 'Critic did not produce a valid verdict.',
+          finishedAt,
+          durationMs,
+          reason,
+          ...cycleCostUsd(cycle, details.costUsd),
+        });
+        store.writeTask(invalid, 'running');
+        recordEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
+        completeLoop(
+          invalid,
+          'passed',
+          incompletePolishCritic
+            ? incompletePolishSummary()
+            : `Passed before polish cycle ${cycleNumber} received a valid verdict.`,
+        );
+        return;
+      }
+
+      registerFailedCycle(current, cycleNumber, {
         status: 'critic_invalid',
-        phase: cyclePhase(cycle, 'critic'),
+        phase: 'critic',
+        verdict: 'FAIL',
+        fixes: 'Critic did not produce a valid verdict. Re-check the current PLAN.md item.',
         summary: 'Critic did not produce a valid verdict.',
         finishedAt,
         durationMs,
         reason,
         ...cycleCostUsd(cycle, details.costUsd),
+      }, {
+        type: 'critic_invalid',
+        data: { id: loop.id, cycle: cycleNumber, reason },
       });
-      store.writeTask(invalid, 'running');
-      recordEvent('critic_invalid', { id: loop.id, cycle: cycleNumber, reason });
-      completeLoop(
-        invalid,
-        passed ? 'passed' : 'failed',
-        passed && incompletePolishCritic
-          ? incompletePolishSummary()
-          : passed
-            ? `Passed before polish cycle ${cycleNumber} received a valid verdict.`
-            : `Cycle ${cycleNumber} critic was invalid.`,
-        passed ? undefined : reason,
-      );
       return;
     }
 
@@ -1251,14 +1302,35 @@ function finishLoopCritic(loop, cycleNumber, details) {
           ...cycleCostUsd(cycle, details.costUsd),
         });
         // Without this the shipped tree stays dirty and the next auto-checkpoint loop is refused.
-        shipped = recordCheckpoint(shipped, null, 'wip(loop): polish shipped');
+        try {
+          shipped = recordCheckpoint(shipped, null, 'wip(loop): polish shipped');
+        } catch (error) {
+          if (error instanceof GitCheckpointError) {
+            registerFailedCycle(current, cycleNumber, {
+              status: 'failed',
+              phase: 'polish',
+              verdict: 'FAIL',
+              fixes: `Checkpoint failed: ${error.stderr}`,
+              summary: `Checkpoint failed: ${error.stderr}`,
+              finishedAt,
+              durationMs,
+              reason: error.stderr,
+              ...cycleCostUsd(cycle, details.costUsd),
+            }, {
+              type: 'critic_verdict',
+              data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: `Checkpoint failed: ${error.stderr}`, reason: error.stderr },
+            });
+            return;
+          }
+          throw error;
+        }
         store.writeTask(shipped, 'running');
         recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'SHIP' });
         completeLoop(shipped, 'passed', `Shipped on cycle ${cycleNumber}.`);
         return;
       }
 
-      const improved = updateCycle(current, cycleNumber, {
+      let improved = updateCycle(current, cycleNumber, {
         status: 'improve',
         phase: 'polish',
         verdict: 'IMPROVE',
@@ -1278,8 +1350,30 @@ function finishLoopCritic(loop, cycleNumber, details) {
 
       if (cycleNumber >= current.maxCycles) {
         // Without this the validated tree stays dirty and the next auto-checkpoint loop is refused.
+        try {
+          improved = recordCheckpoint(improved, null, 'wip(loop): polish improved');
+        } catch (error) {
+          if (error instanceof GitCheckpointError) {
+            registerFailedCycle(current, cycleNumber, {
+              status: 'failed',
+              phase: 'polish',
+              verdict: 'FAIL',
+              fixes: `Checkpoint failed: ${error.stderr}`,
+              summary: `Checkpoint failed: ${error.stderr}`,
+              finishedAt,
+              durationMs,
+              reason: error.stderr,
+              ...cycleCostUsd(cycle, details.costUsd),
+            }, {
+              type: 'critic_verdict',
+              data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: `Checkpoint failed: ${error.stderr}`, reason: error.stderr },
+            });
+            return;
+          }
+          throw error;
+        }
         completeLoop(
-          recordCheckpoint(improved, null, 'wip(loop): polish improved'),
+          improved,
           'passed',
           'The final improvement was not applied; the working tree may not match the last validated state.',
         );
@@ -1301,7 +1395,30 @@ function finishLoopCritic(loop, cycleNumber, details) {
         durationMs,
         ...cycleCostUsd(cycle, details.costUsd),
       });
-      passed = recordCheckpoint(passed, null, 'wip(loop): final pass');
+
+      try {
+        passed = recordCheckpoint(passed, null, 'wip(loop): final pass');
+      } catch (error) {
+        if (error instanceof GitCheckpointError) {
+          registerFailedCycle(current, cycleNumber, {
+            status: 'failed',
+            phase: 'critic',
+            verdict: 'FAIL',
+            fixes: `Checkpoint failed: ${error.stderr}`,
+            summary: `Checkpoint failed: ${error.stderr}`,
+            finishedAt,
+            durationMs,
+            reason: error.stderr,
+            ...cycleCostUsd(cycle, details.costUsd),
+          }, {
+            type: 'critic_verdict',
+            data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: `Checkpoint failed: ${error.stderr}`, reason: error.stderr },
+          });
+          return;
+        }
+        throw error;
+      }
+
       store.writeTask(passed, 'running');
       recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'PASS' });
 
@@ -1337,7 +1454,30 @@ function finishLoopCritic(loop, cycleNumber, details) {
           ...cycleCostUsd(cycle, details.costUsd),
         },
       );
-      continued = recordCheckpoint(continued, cycleNumber, `wip(loop): task ${task} - ${verdict.done}`);
+
+      try {
+        continued = recordCheckpoint(continued, cycleNumber, `wip(loop): task ${task} - ${verdict.done}`);
+      } catch (error) {
+        if (error instanceof GitCheckpointError) {
+          registerFailedCycle(current, cycleNumber, {
+            status: 'failed',
+            phase: 'critic',
+            verdict: 'FAIL',
+            fixes: `Checkpoint failed: ${error.stderr}`,
+            summary: `Checkpoint failed: ${error.stderr}`,
+            finishedAt,
+            durationMs,
+            reason: error.stderr,
+            ...cycleCostUsd(cycle, details.costUsd),
+          }, {
+            type: 'critic_verdict',
+            data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: `Checkpoint failed: ${error.stderr}`, reason: error.stderr },
+          });
+          return;
+        }
+        throw error;
+      }
+
       store.writeTask(continued, 'running');
       recordEvent('critic_verdict', {
         id: loop.id,
@@ -1656,6 +1796,11 @@ function dashboardEvent(event) {
 
   if (event.type === 'cancel') {
     return { ...value, kind: 'info', text: `${task} cancelled${reason}` };
+  }
+
+  if (event.type === 'checkpoint_failed') {
+    const errorMsg = typeof event.error === 'string' ? `: ${event.error}` : '';
+    return { ...value, kind: 'error', text: `${loop}${cycle} checkpoint failed${errorMsg}` };
   }
 
   return { ...value, text: typeof event.type === 'string' ? event.type : value.text };
@@ -2073,7 +2218,9 @@ function checkpointCommit(loop, message, headAtStart) {
     const adopted = tree.ok ? workerCommitSha(headAtStart, projectHead(loop.projectPath), tree.output) : null;
 
     if (!adopted) {
-      appendLoopLog(loop, `checkpoint failed: ${commit.output || 'git error'}`);
+      const err = commit.output || 'git error';
+      appendLoopLog(loop, `checkpoint failed: ${err}`);
+      throw new GitCheckpointError(`checkpoint failed: ${err}`, err);
     }
 
     return adopted;
@@ -2081,7 +2228,13 @@ function checkpointCommit(loop, message, headAtStart) {
 
   const head = runGit(loop.projectPath, ['rev-parse', 'HEAD']);
 
-  return head.ok && head.output ? head.output : null;
+  if (!head.ok || !head.output) {
+    const err = head.output || 'git rev-parse HEAD error';
+    appendLoopLog(loop, `checkpoint failed: ${err}`);
+    throw new GitCheckpointError(`checkpoint failed: ${err}`, err);
+  }
+
+  return head.output;
 }
 
 // cycleNumber ties the sha to that cycle's plan position; null marks the final-pass checkpoint.
@@ -2476,25 +2629,178 @@ function recoverRunningTasks() {
   }
 }
 
-function stop() {
+// On Windows, a scripted SIGTERM (TerminateProcess) kills immediately and never reaches this handler.
+async function stop(exitFn = process.exit) {
+  if (stopping) {
+    return;
+  }
   stopping = true;
+
+  let exited = false;
+  const invokeExit = (code) => {
+    if (exited) {
+      return;
+    }
+    exited = true;
+    if (typeof exitFn === 'function') {
+      exitFn(code);
+    }
+  };
+
+  const deadlineTimer = setTimeout(() => {
+    invokeExit(1);
+  }, shutdownGracePeriodMs + shutdownDeadlineMarginMs);
+  if (deadlineTimer.unref) {
+    deadlineTimer.unref();
+  }
+
+  clearInterval(ticker);
   stopBridge();
+
+  if (server) {
+    try {
+      server.close();
+    } catch {
+    }
+  }
+
+  let runningTasks = [];
+  try {
+    runningTasks = store.listTasks('running');
+  } catch (error) {
+    console.error(`Failed to list running tasks on shutdown: ${error.message}`);
+  }
+
+  for (const task of runningTasks) {
+    if (terminalTaskStatuses.has(task.status)) {
+      try {
+        store.moveTask(task.id, 'running', 'done');
+      } catch (error) {
+        console.error(`Failed to move terminal task ${task.id}: ${error.message}`);
+      }
+      continue;
+    }
+
+    if (task.type === 'loop') {
+      const finishedAt = new Date().toISOString();
+      const passed = hasPassedCycle(task);
+      const cycles = (Array.isArray(task.cycles) ? task.cycles : []).map((cycle) => (
+        cycle && cycle.status === 'running'
+          ? {
+            ...cycle,
+            status: 'failed',
+            summary: 'Daemon shut down before the cycle finished.',
+            finishedAt,
+            reason: 'daemon_shutdown',
+          }
+          : cycle
+      ));
+
+      let dirtyOutput = '';
+      if (task.projectPath) {
+        const statusResult = runGit(task.projectPath, ['status', '--porcelain', '--', '.']);
+        if (statusResult.ok && statusResult.output) {
+          dirtyOutput = statusResult.output;
+        }
+      }
+
+      if (dirtyOutput) {
+        appendLoopLog(task, `unclean working tree on shutdown:\n${dirtyOutput}`);
+      }
+
+      const dirtyFiles = dirtyOutput ? dirtyOutput.split(/\r?\n/).filter(Boolean) : [];
+      const summary = passed
+        ? 'Passed before daemon shutdown.'
+        : dirtyFiles.length
+          ? `Daemon shut down before the loop finished. Working tree has uncommitted changes: ${dirtyFiles.join(', ')}`
+          : 'Daemon shut down before the loop finished.';
+
+      const loopToFinalize = {
+        ...task,
+        cycles,
+        ...(dirtyFiles.length ? { dirtyFiles } : {}),
+      };
+
+      try {
+        completeLoop(loopToFinalize, passed ? 'passed' : 'failed', summary, passed ? undefined : 'daemon_shutdown');
+      } catch (error) {
+        console.error(`Failed to finalize loop ${task.id} on shutdown: ${error.message}`);
+      }
+    } else {
+      try {
+        completeTask(task, {
+          exitCode: null,
+          forceFailed: true,
+          reason: 'daemon_shutdown',
+          resultText: 'Daemon shut down before the task finished.',
+        });
+      } catch (error) {
+        console.error(`Failed to finalize task ${task.id} on shutdown: ${error.message}`);
+      }
+    }
+  }
+
   const workers = [...activeWorkers.values()];
 
   for (const worker of workers) {
-    clearTimeout(worker.timeout);
+    if (worker.timeout) {
+      clearTimeout(worker.timeout);
+    }
   }
 
-  for (const worker of workers) {
-    stopWorker(worker.child);
+  if (workers.length > 0) {
+    for (const worker of workers) {
+      if (worker.child && worker.child.pid) {
+        try {
+          worker.child.kill('SIGTERM');
+        } catch {
+        }
+      }
+    }
+
+    const workerExits = workers.map((worker) => new Promise((resolve) => {
+      if (!worker.child || worker.child.exitCode !== null || worker.child.killed) {
+        resolve();
+        return;
+      }
+      worker.child.once('exit', resolve);
+      worker.child.once('close', resolve);
+      worker.child.once('error', resolve);
+    }));
+
+    let graceTimer;
+    const gracePromise = new Promise((resolve) => {
+      graceTimer = setTimeout(resolve, shutdownGracePeriodMs);
+      if (graceTimer.unref) {
+        graceTimer.unref();
+      }
+    });
+
+    try {
+      await Promise.race([
+        Promise.all(workerExits),
+        gracePromise,
+      ]);
+    } finally {
+      clearTimeout(graceTimer);
+    }
+
+    for (const worker of workers) {
+      if (worker.child && worker.child.exitCode === null) {
+        terminateWorker(worker.child);
+      }
+    }
   }
 
   activeWorkers.clear();
-  clearInterval(ticker);
 
-  if (server) {
-    server.close();
+  try {
+    fs.unlinkSync(store.paths.daemon);
+  } catch {
   }
+
+  clearTimeout(deadlineTimer);
+  invokeExit(0);
 }
 
 function start() {
@@ -2522,7 +2828,9 @@ function start() {
   server.on('error', (error) => {
     console.error(`HTTP server failed: ${error.message}`);
     process.exitCode = 1;
-    stop();
+    stop().catch((stopError) => {
+      console.error(`Failed to stop daemon: ${stopError.message}`);
+    });
   });
   server.listen(daemonInfo.port, '127.0.0.1', () => {
     if (stopping) {
@@ -2534,8 +2842,14 @@ function start() {
     tick();
   });
 
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
+  // Route shutdown signals to stop(); guard against double-entry inside stop().
+  // On Windows, scripted SIGTERM bypasses handlers, but console SIGINT and POSIX signals reach here.
+  process.once('SIGINT', () => {
+    stop().catch((error) => console.error(`Failed to stop daemon on SIGINT: ${error.message}`));
+  });
+  process.once('SIGTERM', () => {
+    stop().catch((error) => console.error(`Failed to stop daemon on SIGTERM: ${error.message}`));
+  });
 }
 
 if (require.main === module) {
@@ -2544,6 +2858,7 @@ if (require.main === module) {
 
 module.exports = {
   start,
+  stop,
   fillSlots,
   blockedEntry,
   cycleTaskNumber,
@@ -2551,4 +2866,13 @@ module.exports = {
   sameProjectTree,
   madeNoChanges,
   workerCommitSha,
+  hasPassedCycle,
+  checkpointCommit,
+  recordCheckpoint,
+  finishLoopCritic,
+  finishLoopWorker,
+  registerFailedCycle,
+  GitCheckpointError,
+  shutdownGracePeriodMs,
+  resetStopping: () => { stopping = false; },
 };
