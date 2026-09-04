@@ -1156,7 +1156,18 @@ function registerFailedCycle(current, cycleNumber, cycleFields, event) {
     : cycleFields);
 
   if (entry) {
-    updated = recordCheckpoint(updated, cycleNumber, `wip(loop): task ${entry.task} blocked - ${entry.item}`);
+    try {
+      updated = recordCheckpoint(updated, cycleNumber, `wip(loop): task ${entry.task} blocked - ${entry.item}`);
+    } catch (error) {
+      if (error instanceof GitCheckpointError) {
+        updated = updateCycle(updated, cycleNumber, {
+          reason: error.stderr,
+        });
+        recordEvent('checkpoint_failed', { id: current.id, cycle: cycleNumber, task: entry.task, error: error.stderr });
+      } else {
+        throw error;
+      }
+    }
   }
 
   store.writeTask(updated, 'running');
@@ -1322,7 +1333,29 @@ function finishLoopCritic(loop, cycleNumber, details) {
         durationMs,
         ...cycleCostUsd(cycle, details.costUsd),
       });
-      passed = recordCheckpoint(passed, null, 'wip(loop): final pass');
+      try {
+        passed = recordCheckpoint(passed, null, 'wip(loop): final pass');
+      } catch (error) {
+        if (error instanceof GitCheckpointError) {
+          registerFailedCycle(current, cycleNumber, {
+            status: 'failed',
+            phase: 'critic',
+            verdict: 'FAIL',
+            fixes: `Checkpoint failed: ${error.stderr}`,
+            summary: `Checkpoint failed: ${error.stderr}`,
+            finishedAt,
+            durationMs,
+            reason: error.stderr,
+            ...cycleCostUsd(cycle, details.costUsd),
+          }, {
+            type: 'critic_verdict',
+            data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: `Checkpoint failed: ${error.stderr}`, reason: error.stderr },
+          });
+          return;
+        }
+        throw error;
+      }
+
       store.writeTask(passed, 'running');
       recordEvent('critic_verdict', { id: loop.id, cycle: cycleNumber, verdict: 'PASS' });
 
@@ -1358,7 +1391,29 @@ function finishLoopCritic(loop, cycleNumber, details) {
           ...cycleCostUsd(cycle, details.costUsd),
         },
       );
-      continued = recordCheckpoint(continued, cycleNumber, `wip(loop): task ${task} - ${verdict.done}`);
+      try {
+        continued = recordCheckpoint(continued, cycleNumber, `wip(loop): task ${task} - ${verdict.done}`);
+      } catch (error) {
+        if (error instanceof GitCheckpointError) {
+          registerFailedCycle(current, cycleNumber, {
+            status: 'failed',
+            phase: 'critic',
+            verdict: 'FAIL',
+            fixes: `Checkpoint failed: ${error.stderr}`,
+            summary: `Checkpoint failed: ${error.stderr}`,
+            finishedAt,
+            durationMs,
+            reason: error.stderr,
+            ...cycleCostUsd(cycle, details.costUsd),
+          }, {
+            type: 'critic_verdict',
+            data: { id: loop.id, cycle: cycleNumber, verdict: 'FAIL', fixes: `Checkpoint failed: ${error.stderr}`, reason: error.stderr },
+          });
+          return;
+        }
+        throw error;
+      }
+
       store.writeTask(continued, 'running');
       recordEvent('critic_verdict', {
         id: loop.id,
@@ -1677,6 +1732,11 @@ function dashboardEvent(event) {
 
   if (event.type === 'cancel') {
     return { ...value, kind: 'info', text: `${task} cancelled${reason}` };
+  }
+
+  if (event.type === 'checkpoint_failed') {
+    const errorMsg = typeof event.error === 'string' ? `: ${event.error}` : '';
+    return { ...value, kind: 'error', text: `${loop}${cycle} checkpoint failed${errorMsg}` };
   }
 
   return { ...value, text: typeof event.type === 'string' ? event.type : value.text };
@@ -2079,6 +2139,14 @@ function workerCommitSha(headAtStart, head, tree) {
   return headAtStart && head && head !== headAtStart && tree === '' ? head : null;
 }
 
+class GitCheckpointError extends Error {
+  constructor(message, stderr) {
+    super(message);
+    this.name = 'GitCheckpointError';
+    this.stderr = stderr;
+  }
+}
+
 // Checkpoint messages are daemon-authored from verdict text alone; agents never run git.
 function checkpointCommit(loop, message, headAtStart) {
   if (loop.autoCommit !== true) {
@@ -2094,7 +2162,9 @@ function checkpointCommit(loop, message, headAtStart) {
     const adopted = tree.ok ? workerCommitSha(headAtStart, projectHead(loop.projectPath), tree.output) : null;
 
     if (!adopted) {
-      appendLoopLog(loop, `checkpoint failed: ${commit.output || 'git error'}`);
+      const err = commit.output || 'git error';
+      appendLoopLog(loop, `checkpoint failed: ${err}`);
+      throw new GitCheckpointError(`checkpoint failed: ${err}`, err);
     }
 
     return adopted;
@@ -2102,7 +2172,13 @@ function checkpointCommit(loop, message, headAtStart) {
 
   const head = runGit(loop.projectPath, ['rev-parse', 'HEAD']);
 
-  return head.ok && head.output ? head.output : null;
+  if (!head.ok || !head.output) {
+    const err = head.output || 'git rev-parse HEAD error';
+    appendLoopLog(loop, `checkpoint failed: ${err}`);
+    throw new GitCheckpointError(`checkpoint failed: ${err}`, err);
+  }
+
+  return head.output;
 }
 
 // cycleNumber ties the sha to that cycle's plan position; null marks the final-pass checkpoint.
@@ -2572,4 +2648,11 @@ module.exports = {
   sameProjectTree,
   madeNoChanges,
   workerCommitSha,
+  hasPassedCycle,
+  checkpointCommit,
+  recordCheckpoint,
+  finishLoopCritic,
+  finishLoopWorker,
+  registerFailedCycle,
+  GitCheckpointError,
 };
