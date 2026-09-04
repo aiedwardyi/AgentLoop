@@ -31,6 +31,8 @@ const terminalTaskStatuses = new Set(['done', 'failed', 'cancelled', 'passed', '
 const dirtyTreeError = 'Auto-checkpoint needs a clean project tree: commit or stash your changes first.';
 const defaultLoopCycles = 3;
 const defaultTaskRetries = 3;
+const shutdownGracePeriodMs = 10000;
+const shutdownDeadlineMarginMs = 2000;
 const runningActivity = new Map();
 const activeWorkers = new Map();
 
@@ -1033,6 +1035,8 @@ function finishLoopWorker(loop, cycleNumber, details) {
         ...workerFields,
         status: 'failed',
         phase: 'worker',
+        verdict: 'FAIL',
+        fixes: workerFields.workerSummary || `Worker failed (${reason}).`,
         summary: workerFields.workerSummary,
         finishedAt,
         durationMs,
@@ -1084,7 +1088,6 @@ function finishLoopWorker(loop, cycleNumber, details) {
           'passed',
           `Passed before polish cycle ${cycleNumber} critic could start.`,
         );
-        console.error(`Failed to start critic for ${loop.id}: ${error.message}`);
         return;
       }
 
@@ -1092,7 +1095,7 @@ function finishLoopWorker(loop, cycleNumber, details) {
         status: 'critic_invalid',
         phase: 'critic',
         verdict: 'FAIL',
-        fixes: 'Critic failed to start. Re-check the current PLAN.md item.',
+        fixes: 'Critic failed to start.',
         summary: 'Critic failed to start.',
         finishedAt,
         durationMs,
@@ -1333,6 +1336,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
         durationMs,
         ...cycleCostUsd(cycle, details.costUsd),
       });
+
       try {
         passed = recordCheckpoint(passed, null, 'wip(loop): final pass');
       } catch (error) {
@@ -1391,6 +1395,7 @@ function finishLoopCritic(loop, cycleNumber, details) {
           ...cycleCostUsd(cycle, details.costUsd),
         },
       );
+
       try {
         continued = recordCheckpoint(continued, cycleNumber, `wip(loop): task ${task} - ${verdict.done}`);
       } catch (error) {
@@ -2573,24 +2578,152 @@ function recoverRunningTasks() {
   }
 }
 
-function stop() {
+// On Windows, a scripted SIGTERM (TerminateProcess) kills immediately and never reaches this handler.
+async function stop(exitFn = process.exit) {
+  if (stopping) {
+    return;
+  }
   stopping = true;
+
+  const deadlineTimer = setTimeout(() => {
+    if (typeof exitFn === 'function') {
+      exitFn(1);
+    }
+  }, shutdownGracePeriodMs + shutdownDeadlineMarginMs);
+  if (deadlineTimer.unref) {
+    deadlineTimer.unref();
+  }
+
+  clearInterval(ticker);
   stopBridge();
+
+  if (server) {
+    try {
+      server.close();
+    } catch {
+    }
+  }
+
+  for (const task of store.listTasks('running')) {
+    if (terminalTaskStatuses.has(task.status)) {
+      try {
+        store.moveTask(task.id, 'running', 'done');
+      } catch (error) {
+        console.error(`Failed to move terminal task ${task.id}: ${error.message}`);
+      }
+      continue;
+    }
+
+    if (task.type === 'loop') {
+      const finishedAt = new Date().toISOString();
+      const passed = hasPassedCycle(task);
+      const cycles = (Array.isArray(task.cycles) ? task.cycles : []).map((cycle) => (
+        cycle && cycle.status === 'running'
+          ? {
+            ...cycle,
+            status: 'failed',
+            summary: 'Daemon shut down before the cycle finished.',
+            finishedAt,
+            reason: 'daemon_shutdown',
+          }
+          : cycle
+      ));
+
+      let dirtyOutput = '';
+      if (task.projectPath) {
+        const statusResult = runGit(task.projectPath, ['status', '--porcelain', '--', '.']);
+        if (statusResult.ok && statusResult.output) {
+          dirtyOutput = statusResult.output;
+        }
+      }
+
+      if (dirtyOutput) {
+        appendLoopLog(task, `unclean working tree on shutdown:\n${dirtyOutput}`);
+      }
+
+      const dirtyFiles = dirtyOutput ? dirtyOutput.split(/\r?\n/).filter(Boolean) : [];
+      const summary = passed
+        ? 'Passed before daemon shutdown.'
+        : dirtyFiles.length
+          ? `Daemon shut down before the loop finished. Working tree has uncommitted changes: ${dirtyFiles.join(', ')}`
+          : 'Daemon shut down before the loop finished.';
+
+      const loopToFinalize = {
+        ...task,
+        cycles,
+        ...(dirtyFiles.length ? { dirtyFiles } : {}),
+      };
+
+      try {
+        completeLoop(loopToFinalize, passed ? 'passed' : 'failed', summary, 'daemon_shutdown');
+      } catch (error) {
+        console.error(`Failed to finalize loop ${task.id} on shutdown: ${error.message}`);
+      }
+    } else {
+      try {
+        completeTask(task, {
+          exitCode: null,
+          forceFailed: true,
+          reason: 'daemon_shutdown',
+          summary: 'Daemon shut down before the task finished.',
+        });
+      } catch (error) {
+        console.error(`Failed to finalize task ${task.id} on shutdown: ${error.message}`);
+      }
+    }
+  }
+
   const workers = [...activeWorkers.values()];
 
   for (const worker of workers) {
-    clearTimeout(worker.timeout);
+    if (worker.timeout) {
+      clearTimeout(worker.timeout);
+    }
   }
 
-  for (const worker of workers) {
-    stopWorker(worker.child);
+  if (workers.length > 0) {
+    for (const worker of workers) {
+      if (worker.child && worker.child.pid) {
+        try {
+          worker.child.kill('SIGTERM');
+        } catch {
+        }
+      }
+    }
+
+    const workerExits = workers.map((worker) => new Promise((resolve) => {
+      if (!worker.child || worker.child.exitCode !== null || worker.child.killed) {
+        resolve();
+        return;
+      }
+      worker.child.once('exit', resolve);
+      worker.child.once('close', resolve);
+      worker.child.once('error', resolve);
+    }));
+
+    await Promise.race([
+      Promise.all(workerExits),
+      new Promise((resolve) => setTimeout(resolve, shutdownGracePeriodMs)),
+    ]);
+
+    for (const worker of workers) {
+      if (worker.child && worker.child.exitCode === null) {
+        terminateWorker(worker.child);
+      }
+    }
   }
 
   activeWorkers.clear();
-  clearInterval(ticker);
 
-  if (server) {
-    server.close();
+  try {
+    fs.unlinkSync(store.paths.daemon);
+  } catch {
+  }
+
+  clearTimeout(deadlineTimer);
+
+  if (typeof exitFn === 'function') {
+    exitFn(0);
   }
 }
 
@@ -2631,8 +2764,10 @@ function start() {
     tick();
   });
 
-  process.once('SIGINT', stop);
-  process.once('SIGTERM', stop);
+  // Route shutdown signals to stop(); guard against double-entry inside stop().
+  // On Windows, scripted SIGTERM bypasses handlers, but console SIGINT and POSIX signals reach here.
+  process.once('SIGINT', () => stop());
+  process.once('SIGTERM', () => stop());
 }
 
 if (require.main === module) {
@@ -2641,6 +2776,7 @@ if (require.main === module) {
 
 module.exports = {
   start,
+  stop,
   fillSlots,
   blockedEntry,
   cycleTaskNumber,
@@ -2655,4 +2791,6 @@ module.exports = {
   finishLoopWorker,
   registerFailedCycle,
   GitCheckpointError,
+  shutdownGracePeriodMs,
+  resetStopping: () => { stopping = false; },
 };
