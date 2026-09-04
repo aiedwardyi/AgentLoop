@@ -2585,10 +2585,19 @@ async function stop(exitFn = process.exit) {
   }
   stopping = true;
 
-  const deadlineTimer = setTimeout(() => {
-    if (typeof exitFn === 'function') {
-      exitFn(1);
+  let exited = false;
+  const invokeExit = (code) => {
+    if (exited) {
+      return;
     }
+    exited = true;
+    if (typeof exitFn === 'function') {
+      exitFn(code);
+    }
+  };
+
+  const deadlineTimer = setTimeout(() => {
+    invokeExit(1);
   }, shutdownGracePeriodMs + shutdownDeadlineMarginMs);
   if (deadlineTimer.unref) {
     deadlineTimer.unref();
@@ -2604,7 +2613,14 @@ async function stop(exitFn = process.exit) {
     }
   }
 
-  for (const task of store.listTasks('running')) {
+  let runningTasks = [];
+  try {
+    runningTasks = store.listTasks('running');
+  } catch (error) {
+    console.error(`Failed to list running tasks on shutdown: ${error.message}`);
+  }
+
+  for (const task of runningTasks) {
     if (terminalTaskStatuses.has(task.status)) {
       try {
         store.moveTask(task.id, 'running', 'done');
@@ -2701,10 +2717,22 @@ async function stop(exitFn = process.exit) {
       worker.child.once('error', resolve);
     }));
 
-    await Promise.race([
-      Promise.all(workerExits),
-      new Promise((resolve) => setTimeout(resolve, shutdownGracePeriodMs)),
-    ]);
+    let graceTimer;
+    const gracePromise = new Promise((resolve) => {
+      graceTimer = setTimeout(resolve, shutdownGracePeriodMs);
+      if (graceTimer.unref) {
+        graceTimer.unref();
+      }
+    });
+
+    try {
+      await Promise.race([
+        Promise.all(workerExits),
+        gracePromise,
+      ]);
+    } finally {
+      clearTimeout(graceTimer);
+    }
 
     for (const worker of workers) {
       if (worker.child && worker.child.exitCode === null) {
@@ -2721,10 +2749,7 @@ async function stop(exitFn = process.exit) {
   }
 
   clearTimeout(deadlineTimer);
-
-  if (typeof exitFn === 'function') {
-    exitFn(0);
-  }
+  invokeExit(0);
 }
 
 function start() {
@@ -2752,7 +2777,9 @@ function start() {
   server.on('error', (error) => {
     console.error(`HTTP server failed: ${error.message}`);
     process.exitCode = 1;
-    stop();
+    stop().catch((stopError) => {
+      console.error(`Failed to stop daemon: ${stopError.message}`);
+    });
   });
   server.listen(daemonInfo.port, '127.0.0.1', () => {
     if (stopping) {
@@ -2766,8 +2793,12 @@ function start() {
 
   // Route shutdown signals to stop(); guard against double-entry inside stop().
   // On Windows, scripted SIGTERM bypasses handlers, but console SIGINT and POSIX signals reach here.
-  process.once('SIGINT', () => stop());
-  process.once('SIGTERM', () => stop());
+  process.once('SIGINT', () => {
+    stop().catch((error) => console.error(`Failed to stop daemon on SIGINT: ${error.message}`));
+  });
+  process.once('SIGTERM', () => {
+    stop().catch((error) => console.error(`Failed to stop daemon on SIGTERM: ${error.message}`));
+  });
 }
 
 if (require.main === module) {
