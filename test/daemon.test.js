@@ -308,24 +308,44 @@ test('finishLoopWorker retries on worker failure reasons instead of ending loop'
     ],
   };
 
-  store.writeTask(loop, 'running');
+  try {
+    store.writeTask(loop, 'running');
 
-  daemon.finishLoopWorker(loop, 1, {
-    resultText: 'failed without json',
-    timedOut: true,
-  });
+    daemon.finishLoopWorker(loop, 1, {
+      resultText: 'failed without json',
+      timedOut: true,
+    });
 
-  const updated = store.readTask(loopId, 'running');
-  assert.ok(updated);
-  assert.equal(updated.status, 'running');
-  assert.equal(updated.failStreak, 1);
-  const c1 = updated.cycles[0];
-  assert.equal(c1.status, 'failed');
-  assert.equal(c1.reason, 'timed_out');
-  try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
+    const updated = store.readTask(loopId, 'running');
+    assert.ok(updated);
+    assert.equal(updated.status, 'running');
+    assert.equal(updated.failStreak, 1);
+    const c1 = updated.cycles[0];
+    assert.equal(c1.status, 'failed');
+    assert.equal(c1.reason, 'timed_out');
+  } finally {
+    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
+  }
 });
 
 test('stop() marks running loop terminal with daemon_shutdown and logs dirty files', async () => {
+  const tempStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-state-'));
+  const originalPaths = { ...store.paths };
+  Object.assign(store.paths, {
+    state: tempStateDir,
+    tasks: path.join(tempStateDir, 'tasks'),
+    pending: path.join(tempStateDir, 'tasks', 'pending'),
+    running: path.join(tempStateDir, 'tasks', 'running'),
+    done: path.join(tempStateDir, 'tasks', 'done'),
+    results: path.join(tempStateDir, 'results'),
+    logs: path.join(tempStateDir, 'logs'),
+    events: path.join(tempStateDir, 'events.ndjson'),
+    messages: path.join(tempStateDir, 'messages.ndjson'),
+    daemon: path.join(tempStateDir, 'daemon.json'),
+    bridge: path.join(tempStateDir, 'bridge.json'),
+    mcpToken: path.join(tempStateDir, 'mcp-token'),
+  });
+
   store.ensureDirs();
   const repo = tempRepo();
   assert.ok(repo);
@@ -379,9 +399,8 @@ test('stop() marks running loop terminal with daemon_shutdown and logs dirty fil
     assert.equal(doneTask.cycles[0].reason, 'daemon_shutdown');
   } finally {
     fs.rmSync(repo.dir, { recursive: true, force: true });
-    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
-    try { fs.unlinkSync(path.join(store.paths.done, `${loopId}.json`)); } catch {}
-    try { fs.unlinkSync(path.join(store.paths.results, `${loopId}.json`)); } catch {}
+    Object.assign(store.paths, originalPaths);
+    fs.rmSync(tempStateDir, { recursive: true, force: true });
     daemon.resetStopping();
   }
 });
@@ -444,7 +463,7 @@ test('finishLoopCritic fails the cycle, leaves verdict FAIL, and does not latch 
   }
 });
 
-test('registerFailedCycle records checkpoint error into cycle reason and emits checkpoint_failed event when blocked checkpoint fails', () => {
+test('registerFailedCycle records checkpoint error into cycle checkpointError and emits checkpoint_failed event when blocked checkpoint fails', () => {
   store.ensureDirs();
   const repo = tempRepo();
   assert.ok(repo);
@@ -484,6 +503,7 @@ test('registerFailedCycle records checkpoint error into cycle reason and emits c
       status: 'failed',
       phase: 'critic',
       verdict: 'FAIL',
+      reason: 'critic_invalid_verdict',
       summary: 'Task 1 failed',
     }, {
       type: 'critic_verdict',
@@ -496,7 +516,8 @@ test('registerFailedCycle records checkpoint error into cycle reason and emits c
     assert.equal(updated.blocked.length, 1);
     const c1 = updated.cycles[0];
     assert.equal(c1.status, 'blocked');
-    assert.match(c1.reason, /index\.lock|checkpoint failed/i);
+    assert.equal(c1.reason, 'critic_invalid_verdict');
+    assert.match(c1.checkpointError, /index\.lock|checkpoint failed/i);
   } finally {
     try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
     fs.rmSync(repo.dir, { recursive: true, force: true });
