@@ -1,0 +1,36 @@
+{
+  "_comment": "Encodes currently-known bug: A4 final-pass labeling (wip(loop): final pass).",
+  "name": "clean-pass",
+  "plan": [
+    "Create add.js"
+  ],
+  "maxCycles": 3,
+  "taskRetries": 2,
+  "autoCommit": true,
+  "engine": {
+    "worker": [
+      {
+        "write": "add.js",
+        "loopResult": {
+          "status": "done",
+          "summary": "did add"
+        }
+      }
+    ],
+    "critic": [
+      "PASS"
+    ]
+  },
+  "expect": {
+    "status": "passed",
+    "checkpoints": 1,
+    "verdicts": [
+      "PASS"
+    ],
+    "tasksDone": 1,
+    "daemonAlive": true,
+    "gitMessages": [
+      "wip(loop): final pass"
+    ]
+  }
+}

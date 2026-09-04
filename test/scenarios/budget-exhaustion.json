@@ -1,0 +1,44 @@
+{
+  "_comment": "Encodes currently-known bug: loop resolves to maxed instead of incomplete when cycles run out.",
+  "name": "budget-exhaustion",
+  "plan": [
+    "Create add.js"
+  ],
+  "maxCycles": 2,
+  "taskRetries": 3,
+  "autoCommit": true,
+  "engine": {
+    "worker": [
+      {
+        "write": "add.js",
+        "contents": "// attempt 1\n",
+        "loopResult": {
+          "status": "done",
+          "summary": "first try"
+        }
+      },
+      {
+        "write": "add.js",
+        "contents": "// attempt 2\n",
+        "loopResult": {
+          "status": "done",
+          "summary": "second try"
+        }
+      }
+    ],
+    "critic": [
+      "FAIL - test failed",
+      "FAIL - test still failed"
+    ]
+  },
+  "expect": {
+    "status": "maxed",
+    "checkpoints": 0,
+    "verdicts": [
+      "FAIL",
+      "FAIL"
+    ],
+    "tasksDone": 0,
+    "daemonAlive": true
+  }
+}

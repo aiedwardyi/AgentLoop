@@ -4,9 +4,20 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 
 const root = path.resolve(__dirname, '..');
+function resolveConfigPath() {
+  if (process.env.AGENTLOOP_CONFIG_PATH) {
+    return path.resolve(process.env.AGENTLOOP_CONFIG_PATH);
+  }
+  const flagIndex = process.argv.indexOf('--config');
+  if (flagIndex !== -1 && process.argv[flagIndex + 1]) {
+    return path.resolve(process.argv[flagIndex + 1]);
+  }
+  return path.join(root, 'config.json');
+}
+
 const paths = {
   root,
-  config: path.join(root, 'config.json'),
+  config: resolveConfigPath(),
   state: path.join(root, 'state'),
   tasks: path.join(root, 'state', 'tasks'),
   pending: path.join(root, 'state', 'tasks', 'pending'),

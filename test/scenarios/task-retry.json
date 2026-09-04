@@ -1,0 +1,46 @@
+{
+  "name": "task-retry",
+  "plan": [
+    "Create add.js"
+  ],
+  "maxCycles": 4,
+  "taskRetries": 2,
+  "autoCommit": true,
+  "engine": {
+    "worker": [
+      {
+        "write": "add.js",
+        "contents": "syntax error\n",
+        "loopResult": {
+          "status": "done",
+          "summary": "initial attempt"
+        }
+      },
+      {
+        "write": "add.js",
+        "contents": "module.exports = { add(a, b) { return a + b; } };\n",
+        "loopResult": {
+          "status": "done",
+          "summary": "fixed add.js"
+        }
+      }
+    ],
+    "critic": [
+      "FAIL - syntax error in add.js",
+      "PASS"
+    ]
+  },
+  "expect": {
+    "status": "passed",
+    "checkpoints": 1,
+    "verdicts": [
+      "FAIL",
+      "PASS"
+    ],
+    "tasksDone": 1,
+    "daemonAlive": true,
+    "gitMessages": [
+      "wip(loop): final pass"
+    ]
+  }
+}
