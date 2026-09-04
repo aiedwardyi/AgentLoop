@@ -405,6 +405,87 @@ test('stop() marks running loop terminal with daemon_shutdown and logs dirty fil
   }
 });
 
+test('finishLoop callbacks after stop() has begun return without throwing', async () => {
+  const tempStateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentloop-state-'));
+  const originalPaths = { ...store.paths };
+  Object.assign(store.paths, {
+    state: tempStateDir,
+    tasks: path.join(tempStateDir, 'tasks'),
+    pending: path.join(tempStateDir, 'tasks', 'pending'),
+    running: path.join(tempStateDir, 'tasks', 'running'),
+    done: path.join(tempStateDir, 'tasks', 'done'),
+    results: path.join(tempStateDir, 'results'),
+    logs: path.join(tempStateDir, 'logs'),
+    events: path.join(tempStateDir, 'events.ndjson'),
+    messages: path.join(tempStateDir, 'messages.ndjson'),
+    daemon: path.join(tempStateDir, 'daemon.json'),
+    bridge: path.join(tempStateDir, 'bridge.json'),
+    mcpToken: path.join(tempStateDir, 'mcp-token'),
+  });
+
+  store.ensureDirs();
+  const loopId = 'test-stopping-callback-loop';
+  const loop = {
+    id: loopId,
+    type: 'loop',
+    status: 'running',
+    autoCommit: false,
+    planTasks: ['task one'],
+    maxCycles: 3,
+    taskRetries: 3,
+    failStreak: 0,
+    cycles: [
+      {
+        n: 1,
+        task: 1,
+        status: 'running',
+        phase: 'worker',
+      },
+    ],
+  };
+
+  try {
+    store.writeTask(loop, 'running');
+    fs.writeFileSync(store.paths.daemon, JSON.stringify({ pid: process.pid, ts: new Date().toISOString() }));
+
+    daemon.resetStopping();
+    await daemon.stop(() => {});
+
+    assert.doesNotThrow(() => {
+      daemon.finishLoopWorker(loop, 1, { resultText: 'still running', timedOut: true });
+    });
+    assert.doesNotThrow(() => {
+      daemon.finishLoopCritic(loop, 1, { exitCode: 0, resultText: 'VERDICT: PASS' });
+    });
+
+    const doneTask = store.readTask(loopId, 'done');
+    assert.ok(doneTask);
+    assert.equal(doneTask.status, 'failed');
+    assert.equal(doneTask.reason, 'daemon_shutdown');
+
+    const leftoverId = 'test-stopping-leftover-loop';
+    const leftover = { ...loop, id: leftoverId };
+    store.writeTask(leftover, 'running');
+
+    assert.doesNotThrow(() => {
+      daemon.finishLoopWorker(leftover, 1, { resultText: 'still running', timedOut: true });
+    });
+    assert.doesNotThrow(() => {
+      daemon.finishLoopCritic(leftover, 1, { exitCode: 0, resultText: 'VERDICT: PASS' });
+    });
+
+    const leftoverTask = store.readTask(leftoverId, 'running');
+    assert.ok(leftoverTask);
+    assert.equal(leftoverTask.status, 'running');
+    assert.equal(leftoverTask.failStreak, 0);
+    assert.equal(leftoverTask.cycles[0].status, 'running');
+  } finally {
+    Object.assign(store.paths, originalPaths);
+    fs.rmSync(tempStateDir, { recursive: true, force: true });
+    daemon.resetStopping();
+  }
+});
+
 test('finishLoopCritic fails the cycle, leaves verdict FAIL, and does not latch hasPassedCycle when final-pass checkpoint fails', () => {
   store.ensureDirs();
   const repo = tempRepo();

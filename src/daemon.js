@@ -955,6 +955,10 @@ function startLoopCycle(loop) {
 }
 
 function finishLoopWorker(loop, cycleNumber, details) {
+  if (stopping) {
+    return;
+  }
+
   const current = readRunningLoop(loop.id);
 
   if (!current) {
@@ -1191,6 +1195,10 @@ function registerFailedCycle(current, cycleNumber, cycleFields, event) {
 }
 
 function finishLoopCritic(loop, cycleNumber, details) {
+  if (stopping) {
+    return;
+  }
+
   const current = readRunningLoop(loop.id);
 
   if (!current) {
