@@ -1164,7 +1164,7 @@ function registerFailedCycle(current, cycleNumber, cycleFields, event) {
     } catch (error) {
       if (error instanceof GitCheckpointError) {
         updated = updateCycle(updated, cycleNumber, {
-          reason: error.stderr,
+          checkpointError: error.stderr,
         });
         recordEvent('checkpoint_failed', { id: current.id, cycle: cycleNumber, task: entry.task, error: error.stderr });
       } else {
@@ -2671,7 +2671,7 @@ async function stop(exitFn = process.exit) {
       };
 
       try {
-        completeLoop(loopToFinalize, passed ? 'passed' : 'failed', summary, 'daemon_shutdown');
+        completeLoop(loopToFinalize, passed ? 'passed' : 'failed', summary, passed ? undefined : 'daemon_shutdown');
       } catch (error) {
         console.error(`Failed to finalize loop ${task.id} on shutdown: ${error.message}`);
       }
@@ -2681,7 +2681,7 @@ async function stop(exitFn = process.exit) {
           exitCode: null,
           forceFailed: true,
           reason: 'daemon_shutdown',
-          summary: 'Daemon shut down before the task finished.',
+          resultText: 'Daemon shut down before the task finished.',
         });
       } catch (error) {
         console.error(`Failed to finalize task ${task.id} on shutdown: ${error.message}`);
