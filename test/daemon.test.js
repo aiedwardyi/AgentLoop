@@ -6,6 +6,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
 const daemon = require('../src/daemon');
+const store = require('../src/store');
 
 const daemonSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'daemon.js'), 'utf8');
 
@@ -207,3 +208,300 @@ test('both polish endings checkpoint the validated tree', () => {
 test('a legacy config model is never stamped onto a new loop', () => {
   assert.doesNotMatch(daemonSource, /model: store\.config\.model/);
 });
+
+test('checkpointCommit throws GitCheckpointError on git failure', () => {
+  const repo = tempRepo();
+  assert.ok(repo);
+  try {
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'initial\n');
+    repo.git('add', 'test.txt');
+    repo.git('commit', '-m', 'initial commit');
+
+    const loop = { id: 'test-loop', projectPath: repo.dir, autoCommit: true };
+    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
+
+    assert.throws(
+      () => daemon.checkpointCommit(loop, 'test checkpoint', ''),
+      daemon.GitCheckpointError,
+    );
+  } finally {
+    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+  }
+});
+
+test('finishLoopCritic fails the cycle and spends retry when checkpoint commit fails', () => {
+  store.ensureDirs();
+  const repo = tempRepo();
+  assert.ok(repo);
+  const loopId = 'test-checkpoint-fail-loop';
+  try {
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'initial\n');
+    repo.git('add', 'test.txt');
+    repo.git('commit', '-m', 'initial commit');
+
+    const head = repo.git('rev-parse', 'HEAD').stdout.trim();
+    const loop = {
+      id: loopId,
+      type: 'loop',
+      status: 'running',
+      autoCommit: true,
+      projectPath: repo.dir,
+      planTasks: ['task one', 'task two'],
+      maxCycles: 3,
+      taskRetries: 3,
+      failStreak: 0,
+      cycles: [
+        {
+          n: 1,
+          task: 1,
+          status: 'running',
+          phase: 'critic',
+          gitAtStart: { head },
+        },
+      ],
+    };
+
+    store.writeTask(loop, 'running');
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'modified\n');
+    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
+
+    daemon.finishLoopCritic(loop, 1, {
+      exitCode: 0,
+      resultText: 'VERDICT: CONTINUE - done: task one; next: task two',
+    });
+
+    const updated = store.readTask(loopId, 'running');
+    assert.ok(updated);
+    assert.equal(updated.failStreak, 1);
+    assert.equal(updated.done, undefined);
+    const c1 = updated.cycles[0];
+    assert.equal(c1.status, 'failed');
+    assert.equal(c1.verdict, 'FAIL');
+    assert.match(c1.reason, /index\.lock|checkpoint failed/i);
+  } finally {
+    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
+  }
+});
+
+test('finishLoopWorker retries on worker failure reasons instead of ending loop', () => {
+  store.ensureDirs();
+  const loopId = 'test-worker-fail-loop';
+  const loop = {
+    id: loopId,
+    type: 'loop',
+    status: 'running',
+    autoCommit: false,
+    planTasks: ['task one'],
+    maxCycles: 3,
+    taskRetries: 3,
+    failStreak: 0,
+    cycles: [
+      {
+        n: 1,
+        task: 1,
+        status: 'running',
+        phase: 'worker',
+      },
+    ],
+  };
+
+  store.writeTask(loop, 'running');
+
+  daemon.finishLoopWorker(loop, 1, {
+    resultText: 'failed without json',
+    timedOut: true,
+  });
+
+  const updated = store.readTask(loopId, 'running');
+  assert.ok(updated);
+  assert.equal(updated.status, 'running');
+  assert.equal(updated.failStreak, 1);
+  const c1 = updated.cycles[0];
+  assert.equal(c1.status, 'failed');
+  assert.equal(c1.reason, 'timed_out');
+  try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
+});
+
+test('stop() marks running loop terminal with daemon_shutdown and logs dirty files', async () => {
+  store.ensureDirs();
+  const repo = tempRepo();
+  assert.ok(repo);
+  const loopId = 'test-shutdown-loop';
+  try {
+    fs.writeFileSync(path.join(repo.dir, 'file.txt'), 'initial\n');
+    repo.git('add', 'file.txt');
+    repo.git('commit', '-m', 'initial');
+
+    fs.writeFileSync(path.join(repo.dir, 'file.txt'), 'dirty content\n');
+
+    const loop = {
+      id: loopId,
+      type: 'loop',
+      status: 'running',
+      autoCommit: true,
+      projectPath: repo.dir,
+      planTasks: ['task one'],
+      maxCycles: 3,
+      cycles: [
+        {
+          n: 1,
+          task: 1,
+          status: 'running',
+          phase: 'worker',
+        },
+      ],
+    };
+
+    store.writeTask(loop, 'running');
+    fs.writeFileSync(store.paths.daemon, JSON.stringify({ pid: process.pid, ts: new Date().toISOString() }));
+    assert.equal(fs.existsSync(store.paths.daemon), true);
+
+    daemon.resetStopping();
+    let exitedCode = null;
+    await daemon.stop((code) => {
+      exitedCode = code;
+    });
+
+    assert.equal(exitedCode, 0);
+    assert.equal(fs.existsSync(store.paths.daemon), false);
+    assert.equal(fs.existsSync(path.join(store.paths.running, `${loopId}.json`)), false);
+
+    const doneTask = store.readTask(loopId, 'done');
+    assert.ok(doneTask);
+    assert.equal(doneTask.status, 'failed');
+    assert.equal(doneTask.reason, 'daemon_shutdown');
+    assert.ok(Array.isArray(doneTask.dirtyFiles));
+    assert.ok(doneTask.dirtyFiles.some((f) => f.includes('file.txt')));
+    assert.equal(doneTask.cycles[0].status, 'failed');
+    assert.equal(doneTask.cycles[0].reason, 'daemon_shutdown');
+  } finally {
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
+    try { fs.unlinkSync(path.join(store.paths.done, `${loopId}.json`)); } catch {}
+    try { fs.unlinkSync(path.join(store.paths.results, `${loopId}.json`)); } catch {}
+    daemon.resetStopping();
+  }
+});
+
+test('finishLoopCritic fails the cycle, leaves verdict FAIL, and does not latch hasPassedCycle when final-pass checkpoint fails', () => {
+  store.ensureDirs();
+  const repo = tempRepo();
+  assert.ok(repo);
+  const loopId = 'test-pass-checkpoint-fail-loop';
+  try {
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'clean\n');
+    repo.git('add', 'test.txt');
+    repo.git('commit', '-m', 'clean');
+    const head = repo.git('rev-parse', 'HEAD').stdout.trim();
+
+    const loop = {
+      id: loopId,
+      type: 'loop',
+      status: 'running',
+      autoCommit: true,
+      projectPath: repo.dir,
+      planTasks: ['task one'],
+      maxCycles: 3,
+      taskRetries: 3,
+      failStreak: 0,
+      cycles: [
+        {
+          n: 1,
+          task: 1,
+          status: 'running',
+          phase: 'critic',
+          gitAtStart: { head },
+        },
+      ],
+    };
+
+    store.writeTask(loop, 'running');
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'modified\n');
+    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
+
+    daemon.finishLoopCritic(loop, 1, {
+      exitCode: 0,
+      resultText: 'VERDICT: PASS',
+    });
+
+    const updated = store.readTask(loopId, 'running');
+    assert.ok(updated);
+    assert.equal(updated.failStreak, 1);
+    assert.equal(updated.status, 'running');
+    const c1 = updated.cycles[0];
+    assert.equal(c1.status, 'failed');
+    assert.equal(c1.verdict, 'FAIL');
+    assert.notEqual(c1.verdict, 'PASS');
+    assert.equal(daemon.hasPassedCycle(updated), false);
+    assert.match(c1.reason, /index\.lock|checkpoint failed/i);
+  } finally {
+    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
+  }
+});
+
+test('registerFailedCycle records checkpoint error into cycle reason and emits checkpoint_failed event when blocked checkpoint fails', () => {
+  store.ensureDirs();
+  const repo = tempRepo();
+  assert.ok(repo);
+  const loopId = 'test-blocked-checkpoint-fail-loop';
+  try {
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'clean\n');
+    repo.git('add', 'test.txt');
+    repo.git('commit', '-m', 'clean');
+    const head = repo.git('rev-parse', 'HEAD').stdout.trim();
+
+    const loop = {
+      id: loopId,
+      type: 'loop',
+      status: 'running',
+      autoCommit: true,
+      projectPath: repo.dir,
+      planTasks: ['task one', 'task two'],
+      maxCycles: 5,
+      taskRetries: 1,
+      failStreak: 0,
+      cycles: [
+        {
+          n: 1,
+          task: 1,
+          status: 'running',
+          phase: 'critic',
+          gitAtStart: { head },
+        },
+      ],
+    };
+
+    store.writeTask(loop, 'running');
+    fs.writeFileSync(path.join(repo.dir, 'test.txt'), 'modified\n');
+    fs.writeFileSync(path.join(repo.dir, '.git', 'index.lock'), '');
+
+    daemon.registerFailedCycle(loop, 1, {
+      status: 'failed',
+      phase: 'critic',
+      verdict: 'FAIL',
+      summary: 'Task 1 failed',
+    }, {
+      type: 'critic_verdict',
+      data: { id: loopId, cycle: 1, verdict: 'FAIL' },
+    });
+
+    const updated = store.readTask(loopId, 'running');
+    assert.ok(updated);
+    assert.ok(Array.isArray(updated.blocked));
+    assert.equal(updated.blocked.length, 1);
+    const c1 = updated.cycles[0];
+    assert.equal(c1.status, 'blocked');
+    assert.match(c1.reason, /index\.lock|checkpoint failed/i);
+  } finally {
+    try { fs.unlinkSync(path.join(repo.dir, '.git', 'index.lock')); } catch {}
+    fs.rmSync(repo.dir, { recursive: true, force: true });
+    try { fs.unlinkSync(path.join(store.paths.running, `${loopId}.json`)); } catch {}
+  }
+});
+
+

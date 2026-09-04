@@ -1,0 +1,36 @@
+{
+  "_comment": "Worker makes no changes; critic still runs and grades with PASS.",
+  "name": "no-change-worker",
+  "plan": [
+    "Verify existing code"
+  ],
+  "maxCycles": 2,
+  "taskRetries": 3,
+  "autoCommit": true,
+  "engine": {
+    "worker": [
+      {
+        "noChange": true,
+        "loopResult": {
+          "status": "done",
+          "summary": "verified existing code, no edits needed"
+        }
+      }
+    ],
+    "critic": [
+      "PASS"
+    ]
+  },
+  "expect": {
+    "status": "passed",
+    "checkpoints": 1,
+    "verdicts": [
+      "PASS"
+    ],
+    "tasksDone": 1,
+    "daemonAlive": true,
+    "gitMessages": [
+      "wip(loop): final pass"
+    ]
+  }
+}

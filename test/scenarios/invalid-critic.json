@@ -1,0 +1,48 @@
+{
+  "_comment": "Critic produces an invalid verdict on cycle 1, retries on task budget, passes on cycle 2.",
+  "name": "invalid-critic",
+  "plan": [
+    "Create add.js"
+  ],
+  "maxCycles": 3,
+  "taskRetries": 3,
+  "autoCommit": true,
+  "engine": {
+    "worker": [
+      {
+        "write": "add.js",
+        "contents": "// add.js\nmodule.exports = (a, b) => a + b;\n",
+        "loopResult": {
+          "status": "done",
+          "summary": "wrote add.js"
+        }
+      },
+      {
+        "write": "add.js",
+        "contents": "// add.js retry\nmodule.exports = (a, b) => a + b;\n",
+        "loopResult": {
+          "status": "done",
+          "summary": "retry add.js"
+        }
+      }
+    ],
+    "critic": [
+      {
+        "lastMessage": "The code looks okay to me, but I forgot the verdict line."
+      },
+      "PASS"
+    ]
+  },
+  "expect": {
+    "status": "passed",
+    "checkpoints": 1,
+    "verdicts": [
+      "PASS"
+    ],
+    "tasksDone": 1,
+    "daemonAlive": true,
+    "gitMessages": [
+      "wip(loop): final pass"
+    ]
+  }
+}
