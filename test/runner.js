@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
+const net = require('node:net');
 const { spawn, spawnSync } = require('node:child_process');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -9,8 +10,6 @@ const WORKSPACE = path.join(REPO_ROOT, 'workspace');
 const FIXTURES = path.join(__dirname, 'fixtures', 'project');
 const SCENARIOS_DIR = path.join(__dirname, 'scenarios');
 const DEFAULT_PORT = 5761;
-const PORT = Number(process.env.AGENTLOOP_HARNESS_PORT || DEFAULT_PORT);
-const BRIDGE_PORT = PORT + 1;
 const HOST = '127.0.0.1';
 const MOCK_CMD = path.join(__dirname, 'mock-engine.cmd');
 const MOCK_JS = path.join(__dirname, 'mock-engine.js');
@@ -20,18 +19,40 @@ const TERMINAL_STATUSES = new Set([
   'done', 'failed', 'cancelled', 'passed', 'maxed', 'partial', 'incomplete', 'plan_complete',
 ]);
 
+let currentPort = Number(process.env.AGENTLOOP_HARNESS_PORT || 0);
 let originalConfigContent = null;
+
+function activePort() {
+  return currentPort || DEFAULT_PORT;
+}
+
+function getAvailablePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = address.port;
+      server.close((err) => {
+        if (err) reject(err);
+        else resolve(port);
+      });
+    });
+  });
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function request(method, urlPath, body) {
+function request(method, urlPath, body, port = currentPort) {
+  const targetPort = port || activePort();
   return new Promise((resolve, reject) => {
     const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
     const req = http.request({
       hostname: HOST,
-      port: PORT,
+      port: targetPort,
       path: urlPath,
       method,
       headers: data ? {
@@ -124,27 +145,63 @@ function daemonAlive(pid) {
   }
 }
 
-async function waitForReady(timeoutMs = 10000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    try {
-      const state = await request('GET', '/api/state');
-      if (state.statusCode === 200 && state.body && state.body.daemon) {
-        return state;
-      }
-    } catch {
-      // daemon booting
-    }
-    await sleep(100);
+async function waitForReady(child, port, timeoutMs = 10000) {
+  let childExitError = null;
+  let stderr = '';
+
+  if (child.stderr) {
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
   }
-  throw new Error(`daemon on ${PORT} did not become ready`);
+
+  const onExit = (code, signal) => {
+    const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
+    childExitError = new Error(`daemon child exited prematurely with code=${code} signal=${signal}${detail}`);
+  };
+  const onError = (err) => {
+    childExitError = err;
+  };
+
+  child.once('exit', onExit);
+  child.once('error', onError);
+
+  const cleanupListeners = () => {
+    child.removeListener('exit', onExit);
+    child.removeListener('error', onError);
+  };
+
+  const started = Date.now();
+  try {
+    while (Date.now() - started < timeoutMs) {
+      if (childExitError) {
+        throw childExitError;
+      }
+      if (!daemonAlive(child.pid)) {
+        throw new Error(`daemon child ${child.pid} exited before readiness`);
+      }
+      try {
+        const state = await request('GET', '/api/state', undefined, port);
+        if (state.statusCode === 200 && state.body && state.body.daemon) {
+          return state;
+        }
+      } catch {
+        // daemon booting
+      }
+      await sleep(100);
+    }
+    throw new Error(`daemon on ${port} did not become ready`);
+  } finally {
+    cleanupListeners();
+  }
 }
 
-async function waitForLoop(id, timeoutMs = 45000) {
+async function waitForLoop(id, timeoutMs = 45000, port = currentPort) {
   const started = Date.now();
   let last = null;
   while (Date.now() - started < timeoutMs) {
-    const state = await request('GET', '/api/state');
+    const state = await request('GET', '/api/state', undefined, port);
     last = state;
     const tasks = state.body && state.body.tasks ? state.body.tasks : {};
     const running = Array.isArray(tasks.running) ? tasks.running : [];
@@ -178,18 +235,24 @@ process.on('SIGINT', () => {
   process.exit(130);
 });
 
-async function startDaemon() {
+async function startDaemon(overridePort) {
   const configPath = path.join(REPO_ROOT, 'config.json');
   if (originalConfigContent === null) {
     originalConfigContent = fs.readFileSync(configPath, 'utf8');
   }
 
+  const port = overridePort || (process.env.AGENTLOOP_HARNESS_PORT
+    ? Number(process.env.AGENTLOOP_HARNESS_PORT)
+    : await getAvailablePort());
+  const bridgePort = await getAvailablePort();
+  currentPort = port;
+
   const testConfig = {
-    dashboardPort: PORT,
+    dashboardPort: port,
     maxConcurrent: 1,
     taskTimeoutMin: 5,
     defaultEngine: 'codex',
-    mcpBridge: { port: BRIDGE_PORT },
+    mcpBridge: { port: bridgePort },
     models: { codex: 'gpt-5.6-terra' },
     enginePaths: { codex: MOCK_EXECUTABLE },
   };
@@ -199,11 +262,13 @@ async function startDaemon() {
   const child = spawn(process.execPath, [path.join(REPO_ROOT, 'src', 'daemon.js')], {
     cwd: REPO_ROOT,
     env: { ...process.env },
-    stdio: 'ignore',
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
 
+  child.port = port;
+
   try {
-    await waitForReady();
+    await waitForReady(child, port);
   } catch (error) {
     stopDaemon(child);
     throw error;
@@ -284,20 +349,22 @@ async function runScenario(scenarioName, child) {
     state: mockState,
   }, null, 2)}\n`);
 
+  const port = (child && child.port) || currentPort;
+
   const started = await request('POST', '/api/loop', {
     project: projectDir,
     maxCycles: scenario.maxCycles,
     taskRetries: scenario.taskRetries,
     engine: 'codex',
     autoCommit: scenario.autoCommit !== false,
-  });
+  }, port);
 
   if (started.statusCode < 200 || started.statusCode >= 300 || !started.body || !started.body.id) {
     throw new Error(`POST /api/loop failed: ${started.statusCode} ${started.raw}`);
   }
 
   const id = started.body.id;
-  const waited = await waitForLoop(id);
+  const waited = await waitForLoop(id, 45000, port);
   if (!waited.done) {
     throw new Error(`Loop ${id} did not reach terminal status within timeout`);
   }
@@ -311,5 +378,7 @@ module.exports = {
   stopDaemon,
   runScenario,
   cleanWorkspace,
-  PORT,
+  get PORT() {
+    return activePort();
+  },
 };

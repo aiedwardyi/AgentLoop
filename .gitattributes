@@ -1,1 +1,3 @@
-* text=auto eol=crlf
+* text=auto
+*.js text eol=lf
+*.cmd text eol=crlf
